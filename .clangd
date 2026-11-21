@@ -1,0 +1,36 @@
+CompileFlags:
+  CompilationDatabase: release
+  Remove:
+    - -mapcs
+    - --specs=*
+    - -fstack-usage
+    - -flto*
+    - -Werror
+    - -fno-builtin
+    - -ffunction-sections
+    - -fdata-sections
+  Add:
+    - -Wno-unknown-warning-option
+
+Diagnostics:
+  UnusedIncludes: None
+  ClangTidy:
+    Add:
+      - bugprone-*
+      - performance-*
+    Remove:
+      - bugprone-easily-swappable-parameters
+      - bugprone-narrowing-conversions
+      - bugprone-branch-clone
+      - bugprone-implicit-widening-of-multiplication-result
+      - bugprone-signed-char-misuse
+      - bugprone-macro-parentheses
+
+Index:
+  Background: Build
+
+InlayHints:
+  Enabled: false
+
+Hover:
+  ShowAKA: true

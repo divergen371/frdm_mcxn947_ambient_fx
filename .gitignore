@@ -1,0 +1,51 @@
+# Build output directories (west / CMake presets)
+/build/
+/debug/
+/release/
+/build-*/
+
+# CMake / Ninja / compilation database
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeUserPresets.json
+compile_commands.json
+*.ninja
+.ninja_deps
+.ninja_log
+
+# ARM GCC / MCUXpresso build & debug artifacts
+*.o
+*.obj
+*.d
+*.a
+*.elf
+*.axf
+*.bin
+*.hex
+*.srec
+*.map
+*.lst
+*.su
+*.ci
+*.jlink
+JLinkLog.txt
+
+# MCUXpresso for VS Code generated SVD (large SDK copy)
+/svd/
+
+# clangd / LSP caches
+.cache/
+
+# Local AI / tool state
+.specstory/
+.adsum/
+
+# macOS / Editor temporary files
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+*.swp
+*.swo
+*~

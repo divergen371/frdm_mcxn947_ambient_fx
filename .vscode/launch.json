@@ -1,0 +1,60 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "mcuxpresso-debug",
+      "name": "Debug",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "probeType": "linkserver",
+      "probeSerialNumber": "",
+      "svdPath": "${workspaceFolder}/svd/MCXN947cm33_core0.xml",
+      "executable": {
+        "elf": ""
+      },
+      "stopAtSymbol": "main",
+      "isAttach": false,
+      "skipBuildBeforeDebug": false,
+      "registerUseNaturalFormat": true,
+      "variableUseNaturalFormat": true,
+      "gdbInitCommands": [
+        "set remotetimeout 600",
+        "set debug-file-directory",
+        "set non-stop off"
+      ],
+      "gdbServerConfigs": {
+        "linkserver": {},
+        "segger": {},
+        "pemicro": {}
+      },
+      "showDevDebugOutput": "none"
+    },
+    {
+      "type": "mcuxpresso-debug",
+      "name": "Attach (Running Target)",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "probeType": "linkserver",
+      "probeSerialNumber": "",
+      "svdPath": "${workspaceFolder}/svd/MCXN947cm33_core0.xml",
+      "executable": {
+        "elf": "${workspaceFolder}/release/frdm_mcxn947_ambient_fx_cm33_core0.elf"
+      },
+      "isAttach": true,
+      "skipBuildBeforeDebug": true,
+      "registerUseNaturalFormat": true,
+      "variableUseNaturalFormat": true,
+      "gdbInitCommands": [
+        "set remotetimeout 600",
+        "set debug-file-directory",
+        "set non-stop off"
+      ],
+      "gdbServerConfigs": {
+        "linkserver": {},
+        "segger": {},
+        "pemicro": {}
+      },
+      "showDevDebugOutput": "none"
+    }
+  ]
+}

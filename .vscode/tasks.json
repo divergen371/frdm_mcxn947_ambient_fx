@@ -1,0 +1,97 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "cmake",
+      "label": "CMake: build",
+      "command": "build",
+      "preset": "release",
+      "targets": [
+        "all"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "detail": "CMake template build task"
+    },
+    {
+      "type": "cmake",
+      "label": "CMake: configure",
+      "command": "configure",
+      "preset": "release",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "detail": "CMake template configure task"
+    },
+    {
+      "type": "shell",
+      "label": "Release: Build",
+      "command": "if [ ! -f release/build.ninja ]; then /opt/homebrew/bin/cmake --preset release; fi && /opt/homebrew/bin/cmake --build --preset release",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": false
+      },
+      "detail": "Configure (if needed) and build release preset (-O3 -flto=auto)"
+    },
+    {
+      "type": "shell",
+      "label": "Release: Flash",
+      "command": "/Applications/LinkServer_26.9.130/LinkServer",
+      "args": [
+        "flash",
+        "MCXN947",
+        "load",
+        "${workspaceFolder}/release/frdm_mcxn947_ambient_fx_cm33_core0.elf"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": false
+      },
+      "detail": "Flash release ELF to FRDM-MCXN947 via LinkServer"
+    },
+    {
+      "type": "shell",
+      "label": "Release: Build & Flash",
+      "command": "/Applications/LinkServer_26.9.130/LinkServer",
+      "args": [
+        "flash",
+        "MCXN947",
+        "load",
+        "${workspaceFolder}/release/frdm_mcxn947_ambient_fx_cm33_core0.elf"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": [
+        "Release: Build"
+      ],
+      "dependsOrder": "sequence",
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": false
+      },
+      "detail": "Build release preset and flash ELF to FRDM-MCXN947 via LinkServer"
+    }
+  ]
+}

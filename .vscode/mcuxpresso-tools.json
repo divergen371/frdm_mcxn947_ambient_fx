@@ -1,0 +1,15 @@
+{
+  "version": "25.3",
+  "toolchainPath": "${userHome}/.mcuxpressotools/arm-gnu-toolchain-14.2.rel1-darwin-arm64-arm-none-eabi",
+  "linkedProjects": [],
+  "trustZoneType": "none",
+  "multicoreType": "none",
+  "projectType": "sdk-v2-freestanding",
+  "sdk": {
+    "path": "${userHome}/MCXN947/frdm_mcxn947",
+    "version": "26.9.0",
+    "boardId": "frdmmcxn947",
+    "deviceId": "MCXN947",
+    "coreId": "cm33_core0"
+  }
+}
