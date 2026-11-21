@@ -25,6 +25,7 @@ Diagnostics:
       - bugprone-implicit-widening-of-multiplication-result
       - bugprone-signed-char-misuse
       - bugprone-macro-parentheses
+      - performance-no-int-to-ptr
 
 Index:
   Background: Build
