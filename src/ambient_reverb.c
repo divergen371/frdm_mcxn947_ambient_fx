@@ -28,7 +28,7 @@
 #define TAP_BUF_MASK     (TAP_BUF_SIZE - 1U)
 #define TAP_COUNT        16U
 
-/* 48 kHz フルレート 酩酊 3 相デュアル LFO コーラス専用バッファ (2048 サンプル = 42.7 ms) */
+/* 48 kHz フルレート Dimension Chorus 専用バッファ (2048 サンプル = 42.7 ms, 純フィードフォワード) */
 #define CHO_BUF_SIZE     2048U
 #define CHO_BUF_MASK     (CHO_BUF_SIZE - 1U)
 
@@ -37,13 +37,11 @@
 #define SHIM_BUF_MASK    (SHIM_BUF_SIZE - 1U)
 
 /* LFO 位相増分 @ 48 kHz: round(f * 2^32 / 48000) */
-#define FDN_LFO_INC          40265UL     /* 約 0.45 Hz */
-#define CHORUS_LFO_MAIN_INC  37581UL     /* 0.42 Hz (2.38 秒周期: 大きな 3 相うねり) */
-#define CHORUS_LFO_DRIFT_INC 15211UL     /* 0.17 Hz (5.88 秒周期: 非整数比の酩酊ドリフト) */
-#define PHASE_90_DEG         0x40000000UL
-#define PHASE_120_DEG        0x55555555UL
-#define PHASE_180_DEG        0x80000000UL
-#define PHASE_240_DEG        0xAAAAAAAAUL
+#define FDN_LFO_INC        40265UL     /* 約 0.45 Hz */
+#define DIM_LFO_INC        29528UL     /* 0.33 Hz (3.03 秒周期: DC-2 風 揺れない逆相ペア) */
+#define PAN_LFO_INC        58161UL     /* 0.65 Hz (1.54 秒周期: ハーモニック・パンニング旋回) */
+#define PAN_DRIFT_INC      17001UL     /* 0.19 Hz (5.26 秒周期: テンポ揺らぎによる酩酊感) */
+#define PHASE_90_DEG       0x40000000UL
 
 /* SPX90 風 L/R 非対称 16+16 素数反射タップ @ 48 kHz (20 ms .. 255 ms) */
 static const uint16_t g_tap_dly_l[TAP_COUNT] = {
@@ -92,10 +90,13 @@ static int32_t g_shim_dc = 0;
 static int32_t g_shim_lp1 = 0;
 static int32_t g_shim_lp2 = 0;
 
-static int32_t g_cho_lp = 0;
+static int32_t g_dim_lp = 0;
+static int32_t g_pan_lp_l = 0;
+static int32_t g_pan_lp_r = 0;
 static uint32_t g_fdn_lfo = 0UL;
-static uint32_t g_chorus_lfo = 0UL;
-static uint32_t g_chorus_drift = 0UL;
+static uint32_t g_dim_lfo = 0UL;
+static uint32_t g_pan_lfo = 0UL;
+static uint32_t g_pan_drift = 0UL;
 
 static volatile ambient_preset_t g_preset = AMBIENT_PRESET_REVERSE_GATE;
 static volatile ambient_params_t g_params = { 160U, 0U, 255U, 0U, 225U, 1U };
@@ -104,7 +105,7 @@ static const ambient_params_t g_preset_table[AMBIENT_PRESET_COUNT] = {
     /* decay, shimmer, tap_lvl, chorus, mix, tap_mode (1=RevGate, 2=ER) */
     { 165U,   0U, 255U,   0U, 225U, 1U }, /* REVERSE_GATE */
     { 180U,   0U, 255U,   0U, 180U, 2U }, /* EARLY_REFLECTIONS */
-    { 222U,   0U,   0U, 255U, 165U, 0U }, /* CHORUS_3PHASE (Dry 35% + 大きなうねり) */
+    { 218U,   0U,   0U, 255U, 215U, 0U }, /* DIMENSION + HARMONIC PAN TREMOLO */
     { 242U, 130U,   0U,   0U, 190U, 0U }, /* SHIMMER_HALL */
     { 238U, 110U, 235U, 215U, 230U, 1U }, /* SHOEGAZE_CATHEDRAL */
     {   0U,   0U,   0U,   0U,   0U, 0U }, /* BYPASS */
@@ -197,37 +198,77 @@ static inline int16_t cho_read_q8(uint32_t dly_q8)
     return (int16_t)(s0 + (((s1 - s0) * (int32_t)fr) >> 8));
 }
 
-/* 48 kHz フルレート 酩酊 3 相デュアル LFO ステレオ・コーラス (0.42 Hz + 0.17 Hz) */
-static void chorus_3phase_step_48k(int16_t in, int16_t *out_l, int16_t *out_r)
+/*
+ * 48 kHz フルレート Dimension Chorus (Roland SDD-320 / BOSS DC-2 方式)
+ * - フィードバック 0 の純フィードフォワード + BBD 風ローパス (fc ≒ 6.2 kHz)
+ * - 0.33 Hz 逆相ペア × 2 系統 (90° 位相差) のクロスブレンドで、
+ *   Mid のピッチ揺れを相殺しつつ Side 方向へ極ワイドに広げる (±3.4..4.0 cents)
+ */
+static void dimension_chorus_step_48k(int16_t in, int16_t *out_l, int16_t *out_r)
 {
-    /* メイン 3 相うねり (0.42 Hz: 0..448 サンプル = 9.33 ms p-p) */
-    uint32_t m0 = (uint32_t)sine_u10(g_chorus_lfo) * 112UL;
-    uint32_t m1 = (uint32_t)sine_u10(g_chorus_lfo + PHASE_120_DEG) * 112UL;
-    uint32_t m2 = (uint32_t)sine_u10(g_chorus_lfo + PHASE_240_DEG) * 112UL;
+    uint32_t t_a = (uint32_t)tri_u10(g_dim_lfo);
+    uint32_t t_b = 1023U - t_a;
+    uint32_t t_c = (uint32_t)tri_u10(g_dim_lfo + PHASE_90_DEG);
+    uint32_t t_d = 1023U - t_c;
 
-    /* 非整数比ドリフト (0.17 Hz: 0..256 サンプル = 5.33 ms p-p, 3 相異位相) */
-    uint32_t d0 = (uint32_t)sine_u10(g_chorus_drift) * 64UL;
-    uint32_t d1 = (uint32_t)sine_u10(g_chorus_drift + PHASE_90_DEG) * 64UL;
-    uint32_t d2 = (uint32_t)sine_u10(g_chorus_drift + PHASE_180_DEG) * 64UL;
+    /* ペア 1: 4.0..7.0 ms (中心 5.5 ms, ±1.50 ms), ペア 2: 7.25..10.75 ms (中心 9.0 ms, ±1.75 ms) */
+    int32_t a = cho_read_q8((192UL << 8) + (t_a * 36UL));
+    int32_t b = cho_read_q8((192UL << 8) + (t_b * 36UL));
+    int32_t c = cho_read_q8((348UL << 8) + (t_c * 42UL));
+    int32_t d = cho_read_q8((348UL << 8) + (t_d * 42UL));
 
-    /* 基本遅延 320 サンプル (6.67 ms) -> 合成スイープ 6.7..21.3 ms */
-    uint32_t base_q8 = 320UL << 8;
-
-    int32_t t0 = cho_read_q8(base_q8 + m0 + d0);
-    int32_t t1 = cho_read_q8(base_q8 + m1 + d1);
-    int32_t t2 = cho_read_q8(base_q8 + m2 + d2);
-    int32_t fb_sum = ((t0 + t1 + t2) * 85) >> 8;
-
-    /* アナログ BBD 風ウォーム LPF を通したフィードバックで深いうねりを付与 */
-    g_cho_lp += (fb_sum - g_cho_lp) >> 2;
-    g_cho_buf[g_cho_wr] = clamp_s16((int32_t)in + ((g_cho_lp * 112) >> 8));
+    /* BBD 風ウォーム LPF を通して純フィードフォワード書き込み (フィードバック無し) */
+    g_dim_lp += (((int32_t)in - g_dim_lp) * 145) >> 8;
+    g_cho_buf[g_cho_wr] = clamp_s16(g_dim_lp);
     g_cho_wr = (g_cho_wr + 1U) & CHO_BUF_MASK;
-    g_chorus_lfo += CHORUS_LFO_MAIN_INC;
-    g_chorus_drift += CHORUS_LFO_DRIFT_INC;
+    g_dim_lfo += DIM_LFO_INC;
 
-    /* 3 相を均等に絡めつつ逆相成分でワイドステレオ化 */
-    *out_l = clamp_s16((((t0 * 3) + (t1 * 2) - t2) * 110) >> 8);
-    *out_r = clamp_s16((((t2 * 3) + (t1 * 2) - t0) * 110) >> 8);
+    /* クロスブレンド: Mid で逆相ペアがピッチ相殺、Side で極ワイドに展開 */
+    int32_t w_l = ((a * 3) + (c * 2) - (b * 2) - d) >> 2;
+    int32_t w_r = ((b * 3) + (d * 2) - (a * 2) - c) >> 2;
+
+    /* 揺れない原音芯 + Dimension 広がり成分 */
+    *out_l = clamp_s16((int32_t)in + ((w_l * 190) >> 8));
+    *out_r = clamp_s16((int32_t)in + ((w_r * 190) >> 8));
+}
+
+/*
+ * 48 kHz フルレート 酩酊ハーモニック・パンニング・トレモロ
+ * - 1 次クロスオーバー (fc ≒ 550 Hz) で低域/高域を分離
+ * - L 高域↑・L 低域↓ と R 高域↓・R 低域↑ を 0.65 Hz (+ 0.19 Hz テンポ揺らぎ) で旋回させ、
+ *   音程を狂わせず・音量を途切れさせずに空間が酔うように回る酩酊感を作る
+ */
+static void harmonic_pan_tremolo_step_48k(int32_t *io_l, int32_t *io_r, int32_t depth)
+{
+    int32_t in_l = *io_l;
+    int32_t in_r = *io_r;
+
+    /* fc ≒ 550 Hz @ 48 kHz (alpha = 18/256) */
+    g_pan_lp_l += ((in_l - g_pan_lp_l) * 18) >> 8;
+    g_pan_lp_r += ((in_r - g_pan_lp_r) * 18) >> 8;
+
+    int32_t lo_l = g_pan_lp_l;
+    int32_t hi_l = in_l - lo_l;
+    int32_t lo_r = g_pan_lp_r;
+    int32_t hi_r = in_r - lo_r;
+
+    /* 0.19 Hz ドリフトで 0.65 Hz 旋回位相を ±45° 緩やかに揺らし機械的な単調さを消す */
+    uint32_t drift_ph = ((uint32_t)sine_u10(g_pan_drift) - 512U) << 20;
+    int32_t s = (int32_t)sine_u10(g_pan_lfo + drift_ph) - 512; /* -512..+511 */
+    int32_t mod_hi = (s * depth) >> 10;                        /* depth=230 -> ±115 */
+    int32_t mod_lo = (mod_hi * 3) >> 2;                        /* 低域はやや穏やかに逆相旋回 */
+
+    int32_t base = 240; /* Q8: 約 0.94 を中心に 0.49..1.39 の一定パワー寄り変調 */
+    int32_t g_hi_l = base + mod_hi;
+    int32_t g_lo_l = base - mod_lo;
+    int32_t g_hi_r = base - mod_hi;
+    int32_t g_lo_r = base + mod_lo;
+
+    *io_l = ((hi_l * g_hi_l) + (lo_l * g_lo_l)) >> 8;
+    *io_r = ((hi_r * g_hi_r) + (lo_r * g_lo_r)) >> 8;
+
+    g_pan_lfo += PAN_LFO_INC;
+    g_pan_drift += PAN_DRIFT_INC;
 }
 
 /* 48 kHz フルレート 42.7 ms 窓 +1 オクターブ・シマー (クリックレス三角窓) */
@@ -295,10 +336,13 @@ static void clear_buffers(void)
     g_shim_dc = 0;
     g_shim_lp1 = 0;
     g_shim_lp2 = 0;
-    g_cho_lp = 0;
+    g_dim_lp = 0;
+    g_pan_lp_l = 0;
+    g_pan_lp_r = 0;
     g_fdn_lfo = 0UL;
-    g_chorus_lfo = 0UL;
-    g_chorus_drift = 0UL;
+    g_dim_lfo = 0UL;
+    g_pan_lfo = 0UL;
+    g_pan_drift = 0UL;
 }
 
 void ambient_reverb_init(void)
@@ -333,7 +377,7 @@ const char *ambient_reverb_get_preset_name(ambient_preset_t preset)
     {
         case AMBIENT_PRESET_REVERSE_GATE:       return "1: SPX90 Reverse Gate (48kHz 32-tap FIR)";
         case AMBIENT_PRESET_EARLY_REFLECTIONS:  return "2: SPX90 Early Reflections (48kHz 32-tap FIR)";
-        case AMBIENT_PRESET_CHORUS_3PHASE:      return "3: Hypnotic 3-Phase Drift Chorus + Hall";
+        case AMBIENT_PRESET_CHORUS_3PHASE:      return "3: Dimension Chorus + Harmonic Pan";
         case AMBIENT_PRESET_SHIMMER_HALL:       return "4: 4x4 Hadamard FDN + Shimmer";
         case AMBIENT_PRESET_SHOEGAZE_CATHEDRAL: return "5: Shoegaze Cathedral (All-in 48kHz)";
         case AMBIENT_PRESET_BYPASS:             return "6: Bypass (Dry)";
@@ -458,25 +502,26 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
         wet_r += (int32_t)fdn_r;
     }
 
-    /* 3) 48 kHz 酩酊 3 相 6 Hz コーラス */
+    /* 3) 48 kHz Dimension Chorus (揺れない極ワイド空間拡張) */
     if (cho_g > 0)
     {
         int16_t cho_in = (preset == AMBIENT_PRESET_SHOEGAZE_CATHEDRAL)
                              ? clamp_s16((int32_t)x + ((wet_l + wet_r) >> 2))
-                             : clamp_s16(((int32_t)x + ((wet_l + wet_r) >> 1)) >> 1);
-        int16_t cho_l;
-        int16_t cho_r;
+                             : x;
+        int16_t dim_l;
+        int16_t dim_r;
 
-        chorus_3phase_step_48k(cho_in, &cho_l, &cho_r);
+        dimension_chorus_step_48k(cho_in, &dim_l, &dim_r);
         if (preset == AMBIENT_PRESET_CHORUS_3PHASE)
         {
-            wet_l = ((int32_t)cho_l * 220 + (wet_l * 90)) >> 8;
-            wet_r = ((int32_t)cho_r * 220 + (wet_r * 90)) >> 8;
+            /* 揺れない Dimension の広がりを主役に、FDN 空間を程よく重ねる */
+            wet_l = ((int32_t)dim_l * 210 + (wet_l * 105)) >> 8;
+            wet_r = ((int32_t)dim_r * 210 + (wet_r * 105)) >> 8;
         }
         else
         {
-            wet_l = ((wet_l * 3) >> 2) + (((int32_t)cho_l * cho_g) >> 8);
-            wet_r = ((wet_r * 3) >> 2) + (((int32_t)cho_r * cho_g) >> 8);
+            wet_l = ((wet_l * 3) >> 2) + (((int32_t)dim_l * cho_g) >> 8);
+            wet_r = ((wet_r * 3) >> 2) + (((int32_t)dim_r * cho_g) >> 8);
         }
     }
 
@@ -502,6 +547,16 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
 
     uint8_t mix = params.mix;
     uint8_t dry_g = (uint8_t)(255U - mix);
-    *out_l = clamp_s16((((int32_t)x * (int32_t)dry_g) + (wet_l * (int32_t)mix)) >> 8);
-    *out_r = clamp_s16((((int32_t)x * (int32_t)dry_g) + (wet_r * (int32_t)mix)) >> 8);
+    int32_t final_l = (((int32_t)x * (int32_t)dry_g) + (wet_l * (int32_t)mix)) >> 8;
+    int32_t final_r = (((int32_t)x * (int32_t)dry_g) + (wet_r * (int32_t)mix)) >> 8;
+
+    /* 5) 酩酊ハーモニック・パンニング・トレモロ (広がりを保ったまま空間ごと旋回) */
+    if (cho_g > 0)
+    {
+        int32_t pan_depth = (preset == AMBIENT_PRESET_CHORUS_3PHASE) ? 230 : 140;
+        harmonic_pan_tremolo_step_48k(&final_l, &final_r, pan_depth);
+    }
+
+    *out_l = clamp_s16(final_l);
+    *out_r = clamp_s16(final_r);
 }
