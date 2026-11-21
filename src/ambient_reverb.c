@@ -28,8 +28,8 @@
 #define TAP_BUF_MASK     (TAP_BUF_SIZE - 1U)
 #define TAP_COUNT        16U
 
-/* 48 kHz フルレート 3 相 6 Hz コーラス専用バッファ (1024 サンプル = 21.3 ms) */
-#define CHO_BUF_SIZE     1024U
+/* 48 kHz フルレート 酩酊 3 相デュアル LFO コーラス専用バッファ (2048 サンプル = 42.7 ms) */
+#define CHO_BUF_SIZE     2048U
 #define CHO_BUF_MASK     (CHO_BUF_SIZE - 1U)
 
 /* 48 kHz フルレート シマー専用バッファ (2048 サンプル = 42.7 ms 窓) */
@@ -37,10 +37,13 @@
 #define SHIM_BUF_MASK    (SHIM_BUF_SIZE - 1U)
 
 /* LFO 位相増分 @ 48 kHz: round(f * 2^32 / 48000) */
-#define FDN_LFO_INC      40265UL     /* 約 0.45 Hz */
-#define CHORUS_LFO_6HZ   536871UL    /* 6.00 Hz */
-#define PHASE_120_DEG    0x55555555UL
-#define PHASE_240_DEG    0xAAAAAAAAUL
+#define FDN_LFO_INC          40265UL     /* 約 0.45 Hz */
+#define CHORUS_LFO_MAIN_INC  37581UL     /* 0.42 Hz (2.38 秒周期: 大きな 3 相うねり) */
+#define CHORUS_LFO_DRIFT_INC 15211UL     /* 0.17 Hz (5.88 秒周期: 非整数比の酩酊ドリフト) */
+#define PHASE_90_DEG         0x40000000UL
+#define PHASE_120_DEG        0x55555555UL
+#define PHASE_180_DEG        0x80000000UL
+#define PHASE_240_DEG        0xAAAAAAAAUL
 
 /* SPX90 風 L/R 非対称 16+16 素数反射タップ @ 48 kHz (20 ms .. 255 ms) */
 static const uint16_t g_tap_dly_l[TAP_COUNT] = {
@@ -89,8 +92,10 @@ static int32_t g_shim_dc = 0;
 static int32_t g_shim_lp1 = 0;
 static int32_t g_shim_lp2 = 0;
 
+static int32_t g_cho_lp = 0;
 static uint32_t g_fdn_lfo = 0UL;
 static uint32_t g_chorus_lfo = 0UL;
+static uint32_t g_chorus_drift = 0UL;
 
 static volatile ambient_preset_t g_preset = AMBIENT_PRESET_REVERSE_GATE;
 static volatile ambient_params_t g_params = { 160U, 0U, 255U, 0U, 225U, 1U };
@@ -99,7 +104,7 @@ static const ambient_params_t g_preset_table[AMBIENT_PRESET_COUNT] = {
     /* decay, shimmer, tap_lvl, chorus, mix, tap_mode (1=RevGate, 2=ER) */
     { 165U,   0U, 255U,   0U, 225U, 1U }, /* REVERSE_GATE */
     { 180U,   0U, 255U,   0U, 180U, 2U }, /* EARLY_REFLECTIONS */
-    { 222U,   0U,   0U, 255U, 220U, 0U }, /* CHORUS_3PHASE */
+    { 222U,   0U,   0U, 255U, 165U, 0U }, /* CHORUS_3PHASE (Dry 35% + 大きなうねり) */
     { 242U, 130U,   0U,   0U, 190U, 0U }, /* SHIMMER_HALL */
     { 238U, 110U, 235U, 215U, 230U, 1U }, /* SHOEGAZE_CATHEDRAL */
     {   0U,   0U,   0U,   0U,   0U, 0U }, /* BYPASS */
@@ -127,6 +132,21 @@ static inline uint16_t tri_u10(uint32_t ph)
 {
     uint16_t p = (uint16_t)(ph >> 21);
     return (p < 1024U) ? p : (uint16_t)(2047U - p);
+}
+
+/* 折り返し点の角が無い滑らかなサイン近似 LFO (出力 0..1023) */
+static inline uint16_t sine_u10(uint32_t ph)
+{
+    uint32_t p = ph >> 22;
+    uint32_t q = p & 511U;
+    uint32_t val = (q * (512U - q)) >> 7; /* 0..512 */
+
+    if (p < 512U)
+    {
+        uint32_t y = 512U + val;
+        return (uint16_t)((y > 1023U) ? 1023U : y);
+    }
+    return (uint16_t)(512U - val);
 }
 
 static inline int16_t allpass_light_step(int16_t *buf, uint16_t len, uint16_t *p_idx, int16_t in)
@@ -177,28 +197,37 @@ static inline int16_t cho_read_q8(uint32_t dly_q8)
     return (int16_t)(s0 + (((s1 - s0) * (int32_t)fr) >> 8));
 }
 
-/* 48 kHz フルレート 酩酊 3 相 6 Hz ステレオ・コーラス */
+/* 48 kHz フルレート 酩酊 3 相デュアル LFO ステレオ・コーラス (0.42 Hz + 0.17 Hz) */
 static void chorus_3phase_step_48k(int16_t in, int16_t *out_l, int16_t *out_r)
 {
-    uint16_t l0 = tri_u10(g_chorus_lfo);
-    uint16_t l1 = tri_u10(g_chorus_lfo + PHASE_120_DEG);
-    uint16_t l2 = tri_u10(g_chorus_lfo + PHASE_240_DEG);
-    /* 0.45 Hz 船酔いドリフト: 0..96 サンプル (2.0 ms @ 48 kHz) */
-    uint32_t drift_q8 = (uint32_t)tri_u10(g_fdn_lfo) * 24UL;
-    uint32_t base_q8 = (96UL << 8) + drift_q8;
+    /* メイン 3 相うねり (0.42 Hz: 0..448 サンプル = 9.33 ms p-p) */
+    uint32_t m0 = (uint32_t)sine_u10(g_chorus_lfo) * 112UL;
+    uint32_t m1 = (uint32_t)sine_u10(g_chorus_lfo + PHASE_120_DEG) * 112UL;
+    uint32_t m2 = (uint32_t)sine_u10(g_chorus_lfo + PHASE_240_DEG) * 112UL;
 
-    /* 6 Hz 3 相変調: 0..264 サンプル (5.5 ms @ 48 kHz -> ±2.75 ms) */
-    int32_t t0 = cho_read_q8(base_q8 + ((uint32_t)l0 * 66UL));
-    int32_t t1 = cho_read_q8(base_q8 + ((uint32_t)l1 * 66UL));
-    int32_t t2 = cho_read_q8(base_q8 + ((uint32_t)l2 * 66UL));
-    int32_t fb_sum = (t0 + t1 + t2) >> 2;
+    /* 非整数比ドリフト (0.17 Hz: 0..256 サンプル = 5.33 ms p-p, 3 相異位相) */
+    uint32_t d0 = (uint32_t)sine_u10(g_chorus_drift) * 64UL;
+    uint32_t d1 = (uint32_t)sine_u10(g_chorus_drift + PHASE_90_DEG) * 64UL;
+    uint32_t d2 = (uint32_t)sine_u10(g_chorus_drift + PHASE_180_DEG) * 64UL;
 
-    g_cho_buf[g_cho_wr] = clamp_s16((int32_t)in + ((fb_sum * 96) >> 8));
+    /* 基本遅延 320 サンプル (6.67 ms) -> 合成スイープ 6.7..21.3 ms */
+    uint32_t base_q8 = 320UL << 8;
+
+    int32_t t0 = cho_read_q8(base_q8 + m0 + d0);
+    int32_t t1 = cho_read_q8(base_q8 + m1 + d1);
+    int32_t t2 = cho_read_q8(base_q8 + m2 + d2);
+    int32_t fb_sum = ((t0 + t1 + t2) * 85) >> 8;
+
+    /* アナログ BBD 風ウォーム LPF を通したフィードバックで深いうねりを付与 */
+    g_cho_lp += (fb_sum - g_cho_lp) >> 2;
+    g_cho_buf[g_cho_wr] = clamp_s16((int32_t)in + ((g_cho_lp * 112) >> 8));
     g_cho_wr = (g_cho_wr + 1U) & CHO_BUF_MASK;
-    g_chorus_lfo += CHORUS_LFO_6HZ;
+    g_chorus_lfo += CHORUS_LFO_MAIN_INC;
+    g_chorus_drift += CHORUS_LFO_DRIFT_INC;
 
-    *out_l = clamp_s16(((t0 + (t1 >> 1) - (t2 >> 2)) * 200) >> 8);
-    *out_r = clamp_s16(((t2 - (t1 >> 1) + (t0 >> 2)) * 200) >> 8);
+    /* 3 相を均等に絡めつつ逆相成分でワイドステレオ化 */
+    *out_l = clamp_s16((((t0 * 3) + (t1 * 2) - t2) * 110) >> 8);
+    *out_r = clamp_s16((((t2 * 3) + (t1 * 2) - t0) * 110) >> 8);
 }
 
 /* 48 kHz フルレート 42.7 ms 窓 +1 オクターブ・シマー (クリックレス三角窓) */
@@ -266,8 +295,10 @@ static void clear_buffers(void)
     g_shim_dc = 0;
     g_shim_lp1 = 0;
     g_shim_lp2 = 0;
+    g_cho_lp = 0;
     g_fdn_lfo = 0UL;
     g_chorus_lfo = 0UL;
+    g_chorus_drift = 0UL;
 }
 
 void ambient_reverb_init(void)
@@ -302,7 +333,7 @@ const char *ambient_reverb_get_preset_name(ambient_preset_t preset)
     {
         case AMBIENT_PRESET_REVERSE_GATE:       return "1: SPX90 Reverse Gate (48kHz 32-tap FIR)";
         case AMBIENT_PRESET_EARLY_REFLECTIONS:  return "2: SPX90 Early Reflections (48kHz 32-tap FIR)";
-        case AMBIENT_PRESET_CHORUS_3PHASE:      return "3: Hypnotic 3-Phase 6Hz Chorus + Hall";
+        case AMBIENT_PRESET_CHORUS_3PHASE:      return "3: Hypnotic 3-Phase Drift Chorus + Hall";
         case AMBIENT_PRESET_SHIMMER_HALL:       return "4: 4x4 Hadamard FDN + Shimmer";
         case AMBIENT_PRESET_SHOEGAZE_CATHEDRAL: return "5: Shoegaze Cathedral (All-in 48kHz)";
         case AMBIENT_PRESET_BYPASS:             return "6: Bypass (Dry)";
@@ -352,9 +383,19 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
     }
 
     /* 2) 48 kHz 4x4 Hadamard FDN */
-    int32_t pre = (tap_mode != 0U)
-                      ? ((((int32_t)tap_l + (int32_t)tap_r) >> 1) + ((int32_t)x >> 2))
-                      : (int32_t)x;
+    int32_t pre;
+    if (preset == AMBIENT_PRESET_SHOEGAZE_CATHEDRAL)
+    {
+        pre = (((int32_t)tap_l + (int32_t)tap_r) >> 1) + ((int32_t)x >> 1);
+    }
+    else if (tap_mode != 0U)
+    {
+        pre = (((int32_t)tap_l + (int32_t)tap_r) >> 1) + ((int32_t)x >> 2);
+    }
+    else
+    {
+        pre = (int32_t)x;
+    }
     if (shim_g > 0)
     {
         pre += (g_shim_lp2 * shim_g) >> 8;
@@ -408,8 +449,8 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
     }
     else if (preset == AMBIENT_PRESET_SHOEGAZE_CATHEDRAL)
     {
-        wet_l = (wet_l >> 1) + ((int32_t)fdn_l >> 1);
-        wet_r = (wet_r >> 1) + ((int32_t)fdn_r >> 1);
+        wet_l += ((int32_t)fdn_l * 3) >> 2;
+        wet_r += ((int32_t)fdn_r * 3) >> 2;
     }
     else
     {
@@ -420,7 +461,9 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
     /* 3) 48 kHz 酩酊 3 相 6 Hz コーラス */
     if (cho_g > 0)
     {
-        int16_t cho_in = clamp_s16(((int32_t)x + ((wet_l + wet_r) >> 1)) >> 1);
+        int16_t cho_in = (preset == AMBIENT_PRESET_SHOEGAZE_CATHEDRAL)
+                             ? clamp_s16((int32_t)x + ((wet_l + wet_r) >> 2))
+                             : clamp_s16(((int32_t)x + ((wet_l + wet_r) >> 1)) >> 1);
         int16_t cho_l;
         int16_t cho_r;
 
@@ -432,8 +475,8 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
         }
         else
         {
-            wet_l = (wet_l >> 1) + (((int32_t)cho_l * cho_g) >> 9);
-            wet_r = (wet_r >> 1) + (((int32_t)cho_r * cho_g) >> 9);
+            wet_l = ((wet_l * 3) >> 2) + (((int32_t)cho_l * cho_g) >> 8);
+            wet_r = ((wet_r * 3) >> 2) + (((int32_t)cho_r * cho_g) >> 8);
         }
     }
 

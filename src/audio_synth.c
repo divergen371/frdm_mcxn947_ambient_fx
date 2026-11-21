@@ -12,6 +12,7 @@
 #define PHASE_INC_C4 23409808UL
 #define PHASE_INC_D4 26276415UL
 #define PHASE_INC_E4 29494312UL
+#define PHASE_INC_F4 31248413UL
 #define PHASE_INC_A4 39370534UL
 #define PHASE_INC_B4 44191472UL
 #define PHASE_INC_C5 46819616UL
@@ -95,7 +96,7 @@ const char *audio_synth_get_name(audio_synth_src_t src)
 {
     switch (src)
     {
-        case SYNTH_SRC_SHOEGAZE_GLIDE: return "Shoegaze Glide Chord (Fmaj7 <-> G6)";
+        case SYNTH_SRC_SHOEGAZE_GLIDE: return "Shoegaze Glide Chord (Fmaj7 - G6 - Asus4 - G9sus4)";
         case SYNTH_SRC_PLUCK_ARP:      return "Bell Pluck Arpeggio (C5-E5-G5-B5)";
         case SYNTH_SRC_SAW_220:        return "Sawtooth 220 Hz";
         default:                       return "Unknown";
@@ -108,25 +109,20 @@ int16_t audio_synth_next_sample(void)
     {
         case SYNTH_SRC_SHOEGAZE_GLIDE:
         {
+            static const uint32_t gaze_chords[4][4] = {
+                { PHASE_INC_F3, PHASE_INC_C4, PHASE_INC_E4, PHASE_INC_A4 }, /* Fmaj7 */
+                { PHASE_INC_G3, PHASE_INC_D4, PHASE_INC_E4, PHASE_INC_B4 }, /* G6 */
+                { PHASE_INC_A3, PHASE_INC_D4, PHASE_INC_E4, PHASE_INC_A4 }, /* Asus4 */
+                { PHASE_INC_G3, PHASE_INC_C4, PHASE_INC_F4, PHASE_INC_A4 }, /* G9sus4 (sus9) */
+            };
             uint16_t gp = (uint16_t)(g_glide_ph >> 21);
             uint16_t bend = (gp < 1024U) ? gp : (uint16_t)(2047U - gp);
-            uint32_t f0, f1, f2, f3;
+            const uint32_t *chord = gaze_chords[g_step & 3U];
+            uint32_t f0 = chord[0];
+            uint32_t f1 = chord[1];
+            uint32_t f2 = chord[2];
+            uint32_t f3 = chord[3];
             int32_t s;
-
-            if ((g_step & 1U) == 0U)
-            {
-                f0 = PHASE_INC_F3;
-                f1 = PHASE_INC_C4;
-                f2 = PHASE_INC_E4;
-                f3 = PHASE_INC_A4;
-            }
-            else
-            {
-                f0 = PHASE_INC_G3;
-                f1 = PHASE_INC_D4;
-                f2 = PHASE_INC_E4;
-                f3 = PHASE_INC_B4;
-            }
 
             f0 -= (f0 >> 15) * (uint32_t)bend;
             f1 -= (f1 >> 15) * (uint32_t)bend;
@@ -159,7 +155,7 @@ int16_t audio_synth_next_sample(void)
             if (g_cnt >= GAZE_BAR_SAMPLES)
             {
                 g_cnt = 0UL;
-                g_step ^= 1U;
+                g_step = (uint8_t)((g_step + 1U) & 3U);
                 g_env = 32767U;
             }
             return (int16_t)s;
