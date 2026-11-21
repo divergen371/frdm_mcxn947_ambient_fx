@@ -35,11 +35,14 @@ NXP **FRDM-MCXN947**（Cortex-M33 @ 150 MHz / 512 KB SRAM / SAI1 + Audio PLL1）
 ### `SW2`（`P0_23`）: プリセット切替
 1. **Reverse Gate**（赤 LED）: SPX90 風 48 kHz 32 タップ逆エンベロープ FIR（255 ms）＋ 軽いオールパス拡散
 2. **Early Reflections**（緑 LED）: 48 kHz 32 タップ立体初期反射 FIR ＋ 軽いオールパス拡散
-3. **Dimension Chorus + Harmonic Pan**（青 LED）: 揺れない極ワイド Dimension Chorus（SDD-320 風逆相クロスブレンド）＋ 酩酊ハーモニック・パンニング・トレモロ ＋ FDN 空間
-4. **Shimmer Hall**（シアン LED）: 48 kHz 4×4 Hadamard FDN ＋ 42.7 ms 窓 +1 オクターブ・シマー
-5. **Shoegaze Cathedral**（マゼンタ LED）: Reverse Gate ＋ 3 相 6 Hz コーラス ＋ FDN ＋ シマー全部盛り
-6. **Bypass**（白 LED）: 原音比較用
-7. **Off**（消灯）: 無音（I²S クロック維持）
+3. **Dimension + Harmonic Pan (`Sine × Sine`)**（青 LED）: 揺れない極ワイド Dimension Chorus ＋ 滑らかサイン波ハーモニック・パンニング
+4. **Dimension + Infinite Cross-Ramp (`RampUp × RampDown`)**（黄 LED）: 高域と低域が逆方向へ無限にすれ違い続ける酩酊旋回
+5. **Dimension + Stardust Pan (`SmoothRand × Sine`)**（シアン LED）: 揺れる低域の上で高域だけが星屑のようにランダム浮遊
+6. **Dimension + Psyche Chop (`SoftSquare × Sine`)**（マゼンタ LED）: 低域のうねりの上で高域が左右に跳ねるサイケ・ハーモニックパン
+7. **Shimmer Hall**（シアン LED）: 48 kHz 4×4 Hadamard FDN ＋ 42.7 ms 窓 +1 オクターブ・シマー
+8. **Shoegaze Cathedral**（マゼンタ LED）: Reverse Gate ＋ Dimension ＋ FDN ＋ シマー ＋ 緩やかなハーモニック・パンニング全部盛り
+9. **Bypass**（白 LED）: 原音比較用
+10. **Off**（消灯）: 無音（I²S クロック維持）
 
 ### `SW3`（`P0_6`）: テスト原音切替
 1. **Shoegaze Glide Chord**（Fmaj7 → G6 → Asus4 → G9sus4 ＋ アーム揺らし）← 起動時

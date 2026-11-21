@@ -23,6 +23,9 @@ static void update_led_for_preset(ambient_preset_t preset)
         case AMBIENT_PRESET_REVERSE_GATE:       board_audio_set_rgb(true,  false, false); break; /* Red */
         case AMBIENT_PRESET_EARLY_REFLECTIONS:  board_audio_set_rgb(false, true,  false); break; /* Green */
         case AMBIENT_PRESET_CHORUS_3PHASE:      board_audio_set_rgb(false, false, true ); break; /* Blue */
+        case AMBIENT_PRESET_PAN_CROSS_RAMP:     board_audio_set_rgb(true,  true,  false); break; /* Yellow */
+        case AMBIENT_PRESET_PAN_STARDUST:       board_audio_set_rgb(false, true,  true ); break; /* Cyan */
+        case AMBIENT_PRESET_PAN_PSYCHE_CHOP:    board_audio_set_rgb(true,  false, true ); break; /* Magenta */
         case AMBIENT_PRESET_SHIMMER_HALL:       board_audio_set_rgb(false, true,  true ); break; /* Cyan */
         case AMBIENT_PRESET_SHOEGAZE_CATHEDRAL: board_audio_set_rgb(true,  false, true ); break; /* Magenta */
         case AMBIENT_PRESET_BYPASS:             board_audio_set_rgb(true,  true,  true ); break; /* White */
