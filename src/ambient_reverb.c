@@ -88,9 +88,10 @@ static uint16_t g_tap_wr = 0U;
 static uint16_t g_cho_wr = 0U;
 static uint16_t g_shim_wr = 0U;
 static uint16_t g_shim_ph = 0U;
+static int32_t g_fdn_hp = 0;
+static int32_t g_cat_cho_hp = 0;
 static int32_t g_shim_dc = 0;
-static int32_t g_shim_lp1 = 0;
-static int32_t g_shim_lp2 = 0;
+static int32_t g_shim_lp = 0;
 
 static int32_t g_dim_lp = 0;
 static int32_t g_pan_lp_l = 0;
@@ -122,8 +123,8 @@ static const ambient_params_t g_preset_table[AMBIENT_PRESET_COUNT] = {
     { 218U,   0U,   0U, 255U, 148U, 0U, 205U,  38U, PAN_WAVE_RAMP_UP,       PAN_WAVE_RAMP_DOWN }, /* DIM + CROSS-RAMP */
     { 224U,   0U,   0U, 255U, 148U, 0U, 205U,  46U, PAN_WAVE_SMOOTH_RANDOM, PAN_WAVE_SINE      }, /* DIM + STARDUST */
     { 218U,   0U,   0U, 255U, 148U, 0U, 205U,  62U, PAN_WAVE_SOFT_SQUARE,   PAN_WAVE_SINE      }, /* DIM + PSYCHE CHOP */
-    { 242U, 130U,   0U,   0U, 190U, 0U,   0U,  36U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* SHIMMER_HALL */
-    { 238U, 110U, 235U, 225U, 230U, 1U, 135U,  30U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* SHOEGAZE_CATHEDRAL */
+    { 236U, 130U,   0U,   0U, 190U, 0U,   0U,  36U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* SHIMMER_HALL */
+    { 234U, 155U, 220U, 125U, 175U, 1U, 135U,  30U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* SHOEGAZE_CATHEDRAL */
     {   0U,   0U,   0U,   0U,   0U, 0U,   0U,   0U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* BYPASS */
     {   0U,   0U,   0U,   0U,   0U, 0U,   0U,   0U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }  /* OFF */
 };
@@ -433,9 +434,10 @@ static void clear_buffers(void)
     g_cho_wr = 0U;
     g_shim_wr = 0U;
     g_shim_ph = 0U;
+    g_fdn_hp = 0;
+    g_cat_cho_hp = 0;
     g_shim_dc = 0;
-    g_shim_lp1 = 0;
-    g_shim_lp2 = 0;
+    g_shim_lp = 0;
     g_dim_lp = 0;
     g_pan_lp_l = 0;
     g_pan_lp_r = 0;
@@ -555,7 +557,7 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
     int32_t pre;
     if (preset == AMBIENT_PRESET_SHOEGAZE_CATHEDRAL)
     {
-        pre = (((int32_t)tap_l + (int32_t)tap_r) >> 1) + ((int32_t)x >> 1);
+        pre = (int32_t)x + (((int32_t)tap_l + (int32_t)tap_r) >> 1);
     }
     else if (tap_mode != 0U)
     {
@@ -567,9 +569,11 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
     }
     if (shim_g > 0)
     {
-        pre += (g_shim_lp2 * shim_g) >> 8;
+        pre += (g_shim_lp * shim_g) >> 8;
     }
-    int16_t fdn_in = clamp_s16(pre);
+    /* FDN 入力の軽いローカット (fc ≒ 180 Hz @ 48 kHz) で低域のこもり膨張を防止 */
+    g_fdn_hp += ((pre - g_fdn_hp) * 6) >> 8;
+    int16_t fdn_in = clamp_s16(pre - g_fdn_hp);
 
     /* LFO モジュレーション (0..12 サンプル Q8 @ 48 kHz) */
     uint16_t tri = tri_u10(g_fdn_lfo);
@@ -581,11 +585,11 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
     int32_t y2 = fdn_read_mod(g_fdn2, FDN_LEN_2, g_fdn_idx[2], mod_a);
     int32_t y3 = fdn_read_mod(g_fdn3, FDN_LEN_3, g_fdn_idx[3], mod_b);
 
-    /* 独立ダンピング LPF @ 48 kHz (fc ≒ 4.5..5.5 kHz) */
-    g_fdn_damp[0] += ((y0 - g_fdn_damp[0]) * 145) >> 8;
-    g_fdn_damp[1] += ((y1 - g_fdn_damp[1]) * 140) >> 8;
-    g_fdn_damp[2] += ((y2 - g_fdn_damp[2]) * 135) >> 8;
-    g_fdn_damp[3] += ((y3 - g_fdn_damp[3]) * 130) >> 8;
+    /* 48 kHz フルレート向け自然な空気吸収ダンピング LPF (残響テイルの高域を保つ) */
+    g_fdn_damp[0] += ((y0 - g_fdn_damp[0]) * 232) >> 8;
+    g_fdn_damp[1] += ((y1 - g_fdn_damp[1]) * 226) >> 8;
+    g_fdn_damp[2] += ((y2 - g_fdn_damp[2]) * 220) >> 8;
+    g_fdn_damp[3] += ((y3 - g_fdn_damp[3]) * 214) >> 8;
 
     y0 = g_fdn_damp[0];
     y1 = g_fdn_damp[1];
@@ -616,11 +620,6 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
         wet_l += (int32_t)fdn_l >> 2;
         wet_r += (int32_t)fdn_r >> 2;
     }
-    else if (preset == AMBIENT_PRESET_SHOEGAZE_CATHEDRAL)
-    {
-        wet_l += ((int32_t)fdn_l * 3) >> 2;
-        wet_r += ((int32_t)fdn_r * 3) >> 2;
-    }
     else
     {
         wet_l += (int32_t)fdn_l;
@@ -630,9 +629,18 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
     /* 3) 48 kHz Dimension Chorus (揺れない極ワイド空間拡張) */
     if (cho_g > 0)
     {
-        int16_t cho_in = (preset == AMBIENT_PRESET_SHOEGAZE_CATHEDRAL)
-                             ? clamp_s16((int32_t)x + ((wet_l + wet_r) >> 2))
-                             : x;
+        int16_t cho_in;
+        if (preset == AMBIENT_PRESET_SHOEGAZE_CATHEDRAL)
+        {
+            /* Cathedral では 300 Hz 以下を軽く切った信号を Dimension へ送り低域団子化を防止 */
+            int32_t raw_cho = (int32_t)x + (((int32_t)tap_l + (int32_t)tap_r) >> 3);
+            g_cat_cho_hp += ((raw_cho - g_cat_cho_hp) * 10) >> 8; /* fc ≒ 300 Hz */
+            cho_in = clamp_s16(raw_cho - g_cat_cho_hp);
+        }
+        else
+        {
+            cho_in = x;
+        }
         int16_t dim_l;
         int16_t dim_r;
 
@@ -645,27 +653,26 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
         }
         else
         {
-            wet_l = ((wet_l * 3) >> 2) + (((int32_t)dim_l * cho_g) >> 8);
-            wet_r = ((wet_r * 3) >> 2) + (((int32_t)dim_r * cho_g) >> 8);
+            wet_l += ((int32_t)dim_l * cho_g) >> 8;
+            wet_r += ((int32_t)dim_r * cho_g) >> 8;
         }
     }
 
-    /* 4) 48 kHz +1 オクターブ・シマー (独立 42.7 ms 窓 + DC ブロッカ + 2 段 LPF) */
+    /* 4) 48 kHz +1 オクターブ・シマー (独立 42.7 ms 窓 + 低域カット + エアリー LPF) */
     if (shim_g > 0)
     {
         int16_t mono_fdn = (int16_t)(((int32_t)fdn_l + (int32_t)fdn_r) >> 1);
         int16_t oct_up = shimmer_step_48k(mono_fdn);
 
-        g_shim_dc += ((int32_t)oct_up - g_shim_dc) >> 6; /* fc ≒ 120 Hz @ 48 kHz */
+        g_shim_dc += ((int32_t)oct_up - g_shim_dc) >> 5; /* fc ≒ 240 Hz @ 48 kHz */
         int32_t oct_hp = (int32_t)oct_up - g_shim_dc;
 
-        g_shim_lp1 += (oct_hp - g_shim_lp1) >> 2;
-        g_shim_lp2 += (g_shim_lp1 - g_shim_lp2) >> 2;
-        if (g_shim_lp2 > 3500) g_shim_lp2 = 3500;
-        if (g_shim_lp2 < -3500) g_shim_lp2 = -3500;
+        g_shim_lp += ((oct_hp - g_shim_lp) * 165) >> 8;  /* fc ≒ 7.8 kHz @ 48 kHz */
+        if (g_shim_lp > 3500) g_shim_lp = 3500;
+        if (g_shim_lp < -3500) g_shim_lp = -3500;
 
-        wet_l += (g_shim_lp2 * shim_g) >> 8;
-        wet_r += (g_shim_lp2 * shim_g) >> 8;
+        wet_l += (g_shim_lp * shim_g) >> 8;
+        wet_r += (g_shim_lp * shim_g) >> 8;
     }
 
     g_fdn_lfo += FDN_LFO_INC;
