@@ -5,6 +5,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "fsl_common.h"
 #include "fsl_debug_console.h"
 #include "fsl_sai.h"
 
@@ -12,9 +13,78 @@
 #include "audio_synth.h"
 #include "board_audio.h"
 
+/* DSP 負荷の実測区間 (ms)。UART 出力自体が負荷になるため、区間ごとに集計をリセットする */
+#define DSP_PROFILE_REPORT_MS 5000U
+
 static bool g_ch_right = false;
 static int16_t g_cur_l = 0;
 static int16_t g_cur_r = 0;
+
+/*
+ * DSP 1 フレーム (L/R ペア) あたりの実行サイクル集計。
+ * ISR 側は加算のみ行い、UART 出力はメインループ側で行う。
+ */
+static volatile uint32_t g_prof_sum   = 0U;
+static volatile uint32_t g_prof_max   = 0U;
+static volatile uint32_t g_prof_count = 0U;
+
+static void dsp_profile_accumulate(uint32_t cycles)
+{
+    g_prof_sum += cycles;
+    if (cycles > g_prof_max)
+    {
+        g_prof_max = cycles;
+    }
+    g_prof_count++;
+}
+
+/* プリセット／原音切替直後の過渡を混ぜないため、区間を明示的に区切る */
+static void dsp_profile_reset(void)
+{
+    DisableIRQ(AUDIO_SAI_IRQ);
+    g_prof_sum   = 0U;
+    g_prof_max   = 0U;
+    g_prof_count = 0U;
+    EnableIRQ(AUDIO_SAI_IRQ);
+}
+
+/*
+ * 集計値を取り出して表示し、次の区間へ向けてリセットする。
+ * 1 サンプル周期は SystemCoreClock / Fs なので、その比がそのまま DSP 占有率になる。
+ */
+static void dsp_profile_report(ambient_preset_t preset)
+{
+    DisableIRQ(AUDIO_SAI_IRQ);
+    uint32_t sum   = g_prof_sum;
+    uint32_t max   = g_prof_max;
+    uint32_t count = g_prof_count;
+    g_prof_sum     = 0U;
+    g_prof_max     = 0U;
+    g_prof_count   = 0U;
+    EnableIRQ(AUDIO_SAI_IRQ);
+
+    if (count == 0U)
+    {
+        return;
+    }
+
+    uint32_t budget = SystemCoreClock / AUDIO_SAMPLE_RATE_HZ;
+    uint32_t avg    = sum / count;
+    uint32_t pct100 = (budget != 0U) ? ((avg * 10000U) / budget) : 0U;
+
+    /*
+     * Debug console lite は [length] 指定子 (%lu 等) を解釈しないため、
+     * 32 bit 環境である前提で %u / %d のみを使う。
+     */
+    PRINTF("[DSP] avg %u cyc/frame (%u.%02u%% of %u) max %u over %u frames | %s\r\n",
+           (unsigned int)avg,
+           (unsigned int)(pct100 / 100U),
+           (unsigned int)(pct100 % 100U),
+           (unsigned int)budget,
+           (unsigned int)max,
+           (unsigned int)count,
+           ambient_reverb_get_preset_name(preset));
+}
 
 static void update_led_for_preset(ambient_preset_t preset)
 {
@@ -42,8 +112,12 @@ static void sai_fill_fifo(void)
     {
         if (!g_ch_right)
         {
-            int16_t raw = audio_synth_next_sample();
+            /* 原音生成と DSP をまとめて 1 フレーム分の実コストとして計測する */
+            uint32_t t0  = MSDK_GetCpuCycleCount();
+            int16_t raw  = audio_synth_next_sample();
             ambient_reverb_process_stereo(raw, &g_cur_l, &g_cur_r);
+            dsp_profile_accumulate(MSDK_GetCpuCycleCount() - t0);
+
             SAI_WriteData(AUDIO_SAI, AUDIO_SAI_CHANNEL, (uint32_t)(uint16_t)g_cur_l);
         }
         else
@@ -115,14 +189,20 @@ int main(void)
     ambient_reverb_set_preset(preset);
     update_led_for_preset(preset);
 
+    /* DWT サイクルカウンタを有効化 (DSP 負荷の実測用) */
+    MSDK_EnableCpuCycleCounter();
+
     PRINTF("\r\n=== FRDM-MCXN947 48kHz Full-Rate Ambient/Shoegaze DSP ===\r\n");
-    PRINTF("Core: %lu Hz | SAI1 MCLK: %u Hz | Fs: %u Hz (0 ppm)\r\n",
-           (unsigned long)SystemCoreClock, AUDIO_MCLK_HZ, AUDIO_SAMPLE_RATE_HZ);
+    PRINTF("Core: %u Hz | SAI1 MCLK: %u Hz | Fs: %u Hz (0 ppm)\r\n",
+           (unsigned int)SystemCoreClock, (unsigned int)AUDIO_MCLK_HZ, (unsigned int)AUDIO_SAMPLE_RATE_HZ);
     PRINTF("SW2: Preset | SW3: Source\r\n");
     PRINTF("Preset: %s\r\n", ambient_reverb_get_preset_name(preset));
     PRINTF("Source: %s\r\n", audio_synth_get_name(src));
 
     init_sai_i2s_master();
+
+    uint32_t prof_start      = MSDK_GetCpuCycleCount();
+    const uint32_t prof_span = (SystemCoreClock / 1000U) * DSP_PROFILE_REPORT_MS;
 
     for (;;)
     {
@@ -140,6 +220,8 @@ int main(void)
                 EnableIRQ(AUDIO_SAI_IRQ);
                 update_led_for_preset(preset);
                 PRINTF("Preset: %s\r\n", ambient_reverb_get_preset_name(preset));
+                dsp_profile_reset();
+                prof_start = MSDK_GetCpuCycleCount();
             }
         }
 
@@ -153,7 +235,15 @@ int main(void)
                 audio_synth_set_src(src);
                 EnableIRQ(AUDIO_SAI_IRQ);
                 PRINTF("Source: %s\r\n", audio_synth_get_name(src));
+                dsp_profile_reset();
+                prof_start = MSDK_GetCpuCycleCount();
             }
+        }
+
+        if ((uint32_t)(MSDK_GetCpuCycleCount() - prof_start) >= prof_span)
+        {
+            dsp_profile_report(preset);
+            prof_start = MSDK_GetCpuCycleCount();
         }
 
         sw2_prev = sw2_now;
