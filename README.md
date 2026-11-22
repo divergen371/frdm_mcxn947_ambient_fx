@@ -33,8 +33,8 @@ NXP **FRDM-MCXN947**（Cortex-M33 @ 150 MHz / 512 KB SRAM / SAI1 + Audio PLL1）
 ## 3. 操作方法（オンボード SW2 / SW3 / RGB LED / UART）
 
 ### `SW2`（`P0_23`）: プリセット切替
-1. **Reverse Gate**（赤 LED）: SPX90 風 48 kHz 32 タップ逆エンベロープ FIR（255 ms）＋ 軽いオールパス拡散
-2. **Early Reflections**（緑 LED）: 48 kHz 32 タップ立体初期反射 FIR ＋ 軽いオールパス拡散
+1. **Reverse Gate**（赤 LED）: SPX90 風 48 kHz 前段 4 段変調拡散 ＋ 64 タップ逆エンベロープ FIR（255 ms）
+2. **Early Reflections**（緑 LED）: 48 kHz 前段 2 段拡散 ＋ 64 タップ立体初期反射 FIR
 3. **Dimension + Harmonic Pan (`Sine × Sine`)**（青 LED）: 揺れない極ワイド Dimension Chorus ＋ 滑らかサイン波ハーモニック・パンニング
 4. **Dimension + Infinite Cross-Ramp (`RampUp × RampDown`)**（黄 LED）: 高域と低域が逆方向へ無限にすれ違い続ける酩酊旋回
 5. **Dimension + Stardust Pan (`SmoothRand × Sine`)**（シアン LED）: 揺れる低域の上で高域だけが星屑のようにランダム浮遊

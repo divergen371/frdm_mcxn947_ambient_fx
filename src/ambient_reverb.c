@@ -17,16 +17,16 @@
 #define FDN_LEN_2        2053U
 #define FDN_LEN_3        2381U
 
-/* 軽いオールパス拡散器 (L/R 独立, 各 2 段 @ 48 kHz: 2.3..3.4 ms) */
-#define DIFF_L0_LEN       113U
-#define DIFF_L1_LEN       149U
-#define DIFF_R0_LEN       127U
-#define DIFF_R1_LEN       163U
+/* 前段 4 段カスケード拡散オールパス (非調和素数長 @ 48 kHz: 4.0 / 6.5 / 9.6 / 14.1 ms) */
+#define PDIFF0_LEN        193U
+#define PDIFF1_LEN        311U
+#define PDIFF2_LEN        463U
+#define PDIFF3_LEN        677U
 
-/* 48 kHz フルレート マルチタップ FIR ディレイライン (16384 サンプル = 341.3 ms) */
+/* 48 kHz フルレート 64 タップ (L/R 32+32) FIR ディレイライン (16384 サンプル = 341.3 ms) */
 #define TAP_BUF_SIZE     16384U
 #define TAP_BUF_MASK     (TAP_BUF_SIZE - 1U)
-#define TAP_COUNT        16U
+#define TAP_COUNT        32U
 
 /* 48 kHz フルレート Dimension Chorus 専用バッファ (2048 サンプル = 42.7 ms, 純フィードフォワード) */
 #define CHO_BUF_SIZE     2048U
@@ -41,50 +41,68 @@
 #define DIM_LFO_INC        29528UL     /* 0.33 Hz (3.03 秒周期: DC-2 風 揺れない逆相ペア) */
 #define PAN_RATE_MIN_INC   17896UL     /* 0.20 Hz (pan_rate = 0) */
 #define PAN_RATE_STEP_INC  1120UL      /* pan_rate 1 刻みあたり +0.0125 Hz (255 で約 3.39 Hz) */
+/* ハーモニック・パンニング 2 次 Linkwitz-Riley (LR2) TPT SVF 係数 (fc = 600 Hz @ 48 kHz, Q28) */
 #define PAN_DRIFT_INC      17001UL     /* 0.19 Hz (5.26 秒周期: テンポ揺らぎによる酩酊感) */
+#define PAN_SVF_A1_Q28     248522831LL /* 1 / (1 + g*(g + 2)), g = tan(pi*600/48000) */
+#define PAN_SVF_A2_Q28     9764489LL   /* g * a1 */
+#define PAN_SVF_A3_Q28     383648LL    /* g * a2 */
+#define PAN_SVF_SHIFT      28
+#define PAN_SVF_ROUND      (1LL << (PAN_SVF_SHIFT - 1))
+#define PHASE_60_DEG       0x2AAAAAABUL
 #define PHASE_90_DEG       0x40000000UL
-#define PHASE_180_DEG      0x80000000UL
 
-/* SPX90 風 L/R 非対称 16+16 素数反射タップ @ 48 kHz (20 ms .. 255 ms) */
+/* SPX90 風 L/R 非対称 32+32 非周期素数反射タップ @ 48 kHz (19 ms .. 255 ms) */
 static const uint16_t g_tap_dly_l[TAP_COUNT] = {
-     977U,  1511U,  2113U,  2801U,  3527U,  4327U,  5119U,  5953U,
-    6779U,  7669U,  8539U,  9403U, 10253U, 10987U, 11597U, 12007U
+      907U,  1483U,  1663U,  2251U,  2591U,  3041U,  3463U,  3709U,
+     4177U,  4733U,  5119U,  5431U,  5827U,  6229U,  6491U,  7039U,
+     7219U,  7669U,  8069U,  8353U,  8627U,  9173U,  9439U,  9733U,
+    10133U, 10337U, 10627U, 11131U, 11273U, 11519U, 11777U, 12203U
 };
 
 static const uint16_t g_tap_dly_r[TAP_COUNT] = {
-    1181U,  1759U,  2411U,  3121U,  3853U,  4621U,  5443U,  6301U,
-    7159U,  7963U,  8887U,  9679U, 10513U, 11261U, 11839U, 12197U
+      997U,  1423U,  1901U,  2237U,  2689U,  3137U,  3373U,  3793U,
+     4327U,  4561U,  5011U,  5569U,  5737U,  6271U,  6673U,  7121U,
+     7351U,  7621U,  7963U,  8563U,  8887U,  9187U,  9539U,  9721U,
+    10037U, 10589U, 10691U, 11003U, 11329U, 11677U, 11887U, 12211U
 };
 
-/* Reverse Gate ゲイン: 255 ms のゲート端へ向かって壁が迫りスパッと切れる */
+/* Reverse Gate ゲイン: 非交互バランス極性で 255 ms のゲート端へ向かって滑らかに立ち上がり切れる */
 static const int16_t g_gain_rev_gate[TAP_COUNT] = {
-     14,  -18,   24,  -32,   42,  -56,   72,  -92,
-    116, -144,  176, -212,  248, -284,  312, -330
+      28,  -29,   31,   34,  -38,  -42,   47,  -52,
+     -58,   65,  -72,   79,   87,  -95,  104, -113,
+    -123,  133,  143, -154,  165, -176, -188,  200,
+     213, -226, -239,  253, -266,  281,  295, -310
 };
 
 /* Early Reflections ゲイン: 初期反射が明瞭に鳴り自然に減衰 */
 static const int16_t g_gain_early_ref[TAP_COUNT] = {
-    290, -250,  218, -188,  160, -136,  114,  -96,
-     80,  -66,   54,  -44,   34,  -26,   18,  -12
+     288, -274,  261,  247, -234, -222,  209, -197,
+    -185,  174, -163,  152,  141, -131,  121, -112,
+    -103,   94,   85,  -77,   69,  -62,  -55,   49,
+      43,  -38,  -33,   28,  -24,   21,   19,  -18
 };
 
-/* 静的ディレイバッファ (合計 約 55 KB / 512 KB SRAM) */
+/* 静的ディレイバッファ (合計 約 63 KB / 512 KB SRAM) */
 static int16_t g_fdn0[FDN_LEN_0];
 static int16_t g_fdn1[FDN_LEN_1];
 static int16_t g_fdn2[FDN_LEN_2];
 static int16_t g_fdn3[FDN_LEN_3];
-static int16_t g_diff_l0[DIFF_L0_LEN];
-static int16_t g_diff_l1[DIFF_L1_LEN];
-static int16_t g_diff_r0[DIFF_R0_LEN];
-static int16_t g_diff_r1[DIFF_R1_LEN];
+static int16_t g_pdiff0[PDIFF0_LEN];
+static int16_t g_pdiff1[PDIFF1_LEN];
+static int16_t g_pdiff2[PDIFF2_LEN];
+static int16_t g_pdiff3[PDIFF3_LEN];
 static int16_t g_tap_buf[TAP_BUF_SIZE];
 static int16_t g_cho_buf[CHO_BUF_SIZE];
 static int16_t g_shim_buf[SHIM_BUF_SIZE];
 
 static uint16_t g_fdn_idx[4];
 static int32_t g_fdn_damp[4];
-static uint16_t g_diff_idx[4];
+static uint16_t g_pdiff_idx[4];
 static uint16_t g_tap_wr = 0U;
+static int32_t g_tap_hp_l = 0;
+static int32_t g_tap_hp_r = 0;
+static int32_t g_tap_lp_l = 0;
+static int32_t g_tap_lp_r = 0;
 static uint16_t g_cho_wr = 0U;
 static uint16_t g_shim_wr = 0U;
 static uint16_t g_shim_ph = 0U;
@@ -94,8 +112,10 @@ static int32_t g_shim_dc = 0;
 static int32_t g_shim_lp = 0;
 
 static int32_t g_dim_lp = 0;
-static int32_t g_pan_lp_l = 0;
-static int32_t g_pan_lp_r = 0;
+static int32_t g_pan_svf_l_ic1 = 0;
+static int32_t g_pan_svf_l_ic2 = 0;
+static int32_t g_pan_svf_r_ic1 = 0;
+static int32_t g_pan_svf_r_ic2 = 0;
 static int32_t g_pan_mod_hi_sm = 0;
 static int32_t g_pan_mod_lo_sm = 0;
 static uint32_t g_fdn_lfo = 0UL;
@@ -119,12 +139,12 @@ static const ambient_params_t g_preset_table[AMBIENT_PRESET_COUNT] = {
     /* decay, shim, tap, cho, mix, tap_m, pan_d, pan_r, hi_wave, lo_wave */
     { 165U,   0U, 255U,   0U, 225U, 1U,   0U,  36U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* REVERSE_GATE */
     { 180U,   0U, 255U,   0U, 180U, 2U,   0U,  36U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* EARLY_REFLECTIONS */
-    { 218U,   0U,   0U, 255U, 148U, 0U, 205U,  34U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* DIM + SINE/SINE */
-    { 218U,   0U,   0U, 255U, 148U, 0U, 205U,  38U, PAN_WAVE_RAMP_UP,       PAN_WAVE_RAMP_DOWN }, /* DIM + CROSS-RAMP */
-    { 224U,   0U,   0U, 255U, 148U, 0U, 205U,  46U, PAN_WAVE_SMOOTH_RANDOM, PAN_WAVE_SINE      }, /* DIM + STARDUST */
-    { 218U,   0U,   0U, 255U, 148U, 0U, 205U,  62U, PAN_WAVE_SOFT_SQUARE,   PAN_WAVE_SINE      }, /* DIM + PSYCHE CHOP */
+    { 218U,   0U,   0U, 255U, 148U, 0U, 235U,  34U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* DIM + SINE/SINE */
+    { 218U,   0U,   0U, 255U, 148U, 0U, 240U,  38U, PAN_WAVE_RAMP_UP,       PAN_WAVE_RAMP_DOWN }, /* DIM + CROSS-RAMP */
+    { 224U,   0U,   0U, 255U, 148U, 0U, 240U,  48U, PAN_WAVE_SMOOTH_RANDOM, PAN_WAVE_SINE      }, /* DIM + STARDUST */
+    { 218U,   0U,   0U, 255U, 148U, 0U, 245U,  64U, PAN_WAVE_SOFT_SQUARE,   PAN_WAVE_SINE      }, /* DIM + PSYCHE CHOP */
     { 236U, 130U,   0U,   0U, 190U, 0U,   0U,  36U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* SHIMMER_HALL */
-    { 234U, 155U, 220U, 125U, 175U, 1U, 135U,  30U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* SHOEGAZE_CATHEDRAL */
+    { 234U, 155U, 145U, 125U, 175U, 1U, 180U,  32U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* SHOEGAZE_CATHEDRAL */
     {   0U,   0U,   0U,   0U,   0U, 0U,   0U,   0U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* BYPASS */
     {   0U,   0U,   0U,   0U,   0U, 0U,   0U,   0U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }  /* OFF */
 };
@@ -167,12 +187,12 @@ static inline uint16_t sine_u10(uint32_t ph)
     return (uint16_t)(512U - val);
 }
 
-static inline int16_t allpass_light_step(int16_t *buf, uint16_t len, uint16_t *p_idx, int16_t in)
+static inline int16_t allpass_dense_step(int16_t *buf, uint16_t len, uint16_t *p_idx, int16_t in, int32_t g_q8)
 {
     uint16_t idx = *p_idx;
-    int16_t b = buf[idx];
-    int32_t v = (int32_t)in + ((int32_t)b >> 1);
-    int32_t out = (int32_t)b - (v >> 1);
+    int32_t b = (int32_t)buf[idx];
+    int32_t v = (int32_t)in + ((b * g_q8) >> 8);
+    int32_t out = b - ((v * g_q8) >> 8);
 
     buf[idx] = clamp_s16(v);
     if (++idx >= len)
@@ -183,13 +203,64 @@ static inline int16_t allpass_light_step(int16_t *buf, uint16_t len, uint16_t *p
     return clamp_s16(out);
 }
 
+/* モジュレーション付き拡散オールパス (定常和音での静的コム共振を溶かす) */
+static inline int16_t allpass_mod_step(int16_t *buf, uint16_t len, uint16_t *p_idx, int16_t in, uint16_t mod_q8, int32_t g_q8)
+{
+    uint16_t idx = *p_idx;
+    uint16_t offset = (uint16_t)(mod_q8 >> 8);
+    uint16_t frac = (uint16_t)(mod_q8 & 0xFFU);
+    uint16_t r0 = idx + offset;
+    uint16_t r1;
+
+    if (r0 >= len)
+    {
+        r0 -= len;
+    }
+    r1 = r0 + 1U;
+    if (r1 >= len)
+    {
+        r1 = 0U;
+    }
+
+    int32_t s0 = buf[r0];
+    int32_t s1 = buf[r1];
+    int32_t b = s0 + (((s1 - s0) * (int32_t)frac) >> 8);
+    int32_t v = (int32_t)in + ((b * g_q8) >> 8);
+    int32_t out = b - ((v * g_q8) >> 8);
+
+    buf[idx] = clamp_s16(v);
+    if (++idx >= len)
+    {
+        idx = 0U;
+    }
+    *p_idx = idx;
+    return clamp_s16(out);
+}
+
+/*
+ * 48 kHz フルレート SPX90 風 64 タップ (L/R 32+32) Reverse Gate / Early Reflections
+ * - 前段カスケード拡散オールパスで入力を濃密な音の雲へ変えてから FIR へ書き込むことで、
+ *   パタパタした粒立ちと金属的コム共振を消しつつ 255 ms ゲート端の切れ味を維持する
+ * - 出力段に SPX90 風の軽いトーンシェーピング (HPF ≒ 140 Hz, LPF ≒ 10 kHz) を適用
+ */
 static void multitap_fir_step_48k(int16_t in, uint8_t tap_mode, int16_t *out_l, int16_t *out_r)
 {
     const int16_t *gains = (tap_mode == 1U) ? g_gain_rev_gate : g_gain_early_ref;
+    int16_t d = allpass_dense_step(g_pdiff0, PDIFF0_LEN, &g_pdiff_idx[0], in, 152);
+    d = allpass_dense_step(g_pdiff1, PDIFF1_LEN, &g_pdiff_idx[1], d, 152);
+
+    if (tap_mode == 1U)
+    {
+        /* Reverse Gate は 4 段フル拡散 + 微弱モジュレーションでベルベット状の音の壁を作る */
+        uint16_t mod_q8 = (uint16_t)(sine_u10(g_fdn_lfo + PHASE_90_DEG) * 2U); /* 0..8 サンプル Q8 */
+        d = allpass_dense_step(g_pdiff2, PDIFF2_LEN, &g_pdiff_idx[2], d, 160);
+        d = allpass_mod_step(g_pdiff3, PDIFF3_LEN, &g_pdiff_idx[3], d, mod_q8, 144);
+    }
+
     int32_t sum_l = 0;
     int32_t sum_r = 0;
 
-    g_tap_buf[g_tap_wr] = in;
+    g_tap_buf[g_tap_wr] = d;
 
     for (uint8_t k = 0U; k < TAP_COUNT; k++)
     {
@@ -199,8 +270,21 @@ static void multitap_fir_step_48k(int16_t in, uint8_t tap_mode, int16_t *out_l, 
     }
 
     g_tap_wr = (g_tap_wr + 1U) & TAP_BUF_MASK;
-    *out_l = clamp_s16(sum_l >> 10);
-    *out_r = clamp_s16(sum_r >> 10);
+
+    int32_t raw_l = (sum_l * 7) >> 12;
+    int32_t raw_r = (sum_r * 7) >> 12;
+
+    /* SPX90 風トーンシェーピング: HPF ≒ 140 Hz (5/256) + LPF ≒ 10 kHz (190/256) */
+    g_tap_hp_l += ((raw_l - g_tap_hp_l) * 5) >> 8;
+    g_tap_hp_r += ((raw_r - g_tap_hp_r) * 5) >> 8;
+    int32_t hp_l = raw_l - g_tap_hp_l;
+    int32_t hp_r = raw_r - g_tap_hp_r;
+
+    g_tap_lp_l += ((hp_l - g_tap_lp_l) * 190) >> 8;
+    g_tap_lp_r += ((hp_r - g_tap_lp_r) * 190) >> 8;
+
+    *out_l = clamp_s16(g_tap_lp_l);
+    *out_r = clamp_s16(g_tap_lp_r);
 }
 
 static inline int16_t cho_read_q8(uint32_t dly_q8)
@@ -302,10 +386,41 @@ static inline int32_t eval_pan_wave_s10(uint32_t ph, uint8_t wave, int32_t r_cur
 }
 
 /*
+ * 2 次 Linkwitz-Riley (LR2) TPT SVF クロスオーバー (fc = 600 Hz @ 48 kHz, Q = 0.5)
+ * - 1 本の SVF で対称な -12 dB/oct の LPF / HPF を同時出力 (600 Hz で両方 -6.02 dB)
+ * - LR2 は全周波数で LPF/HPF が 180° 逆相のため、HPF 極性反転 (hi_inv) を返すことで
+ *   lo + hi_inv が全帯域 0.000 dB フラット (オールパス合成) になる
+ */
+static inline void lr2_svf_split(int32_t in,
+                                 int32_t *ic1eq,
+                                 int32_t *ic2eq,
+                                 int32_t *out_lo,
+                                 int32_t *out_hi_inv)
+{
+    int32_t x_q8 = in << 8;
+    int32_t ic1 = *ic1eq;
+    int32_t ic2 = *ic2eq;
+    int32_t v3 = x_q8 - ic2;
+
+    int32_t v1 = (int32_t)((((int64_t)PAN_SVF_A1_Q28 * ic1)
+                          + ((int64_t)PAN_SVF_A2_Q28 * v3)
+                          + PAN_SVF_ROUND) >> PAN_SVF_SHIFT);
+    int32_t v2 = ic2 + (int32_t)((((int64_t)PAN_SVF_A2_Q28 * ic1)
+                                + ((int64_t)PAN_SVF_A3_Q28 * v3)
+                                + PAN_SVF_ROUND) >> PAN_SVF_SHIFT);
+
+    *ic1eq = (v1 << 1) - ic1;
+    *ic2eq = (v2 << 1) - ic2;
+
+    *out_lo = v2 >> 8;
+    *out_hi_inv = ((v2 + (v1 << 1)) - x_q8) >> 8;
+}
+
+/*
  * 48 kHz フルレート 高域/低域独立波形ハーモニック・パンニング・トレモロ
- * - 1 次クロスオーバー (fc ≒ 550 Hz) で低域/高域を分離
- * - 高域と低域それぞれに任意のカーブ波形を選択可能 (低域は 180° 位相オフセット)
- * - 波形出力へ約 10.7 ms の 1 次スムージング (>> 9) を挟み、
+ * - 2 次 Linkwitz-Riley (LR2) TPT SVF クロスオーバー (-12 dB/oct, fc = 600 Hz) で低域/高域を対称分離
+ * - 高域と低域それぞれに任意のカーブ波形を選択可能 (低域は 60° 位相オフセット)
+ * - 波形出力へ約 5.3 ms の 1 次スムージング (>> 8) を挟み、
  *   ノコギリ波折り返しや矩形波エッジでのクリックノイズを物理的に除去する
  */
 static void harmonic_pan_tremolo_step_48k(int32_t *io_l,
@@ -315,22 +430,16 @@ static void harmonic_pan_tremolo_step_48k(int32_t *io_l,
                                           uint8_t hi_wave,
                                           uint8_t lo_wave)
 {
-    int32_t in_l = *io_l;
-    int32_t in_r = *io_r;
+    int32_t lo_l, hi_l;
+    int32_t lo_r, hi_r;
 
-    /* fc ≒ 550 Hz @ 48 kHz (alpha = 18/256) */
-    g_pan_lp_l += ((in_l - g_pan_lp_l) * 18) >> 8;
-    g_pan_lp_r += ((in_r - g_pan_lp_r) * 18) >> 8;
-
-    int32_t lo_l = g_pan_lp_l;
-    int32_t hi_l = in_l - lo_l;
-    int32_t lo_r = g_pan_lp_r;
-    int32_t hi_r = in_r - lo_r;
+    lr2_svf_split(*io_l, &g_pan_svf_l_ic1, &g_pan_svf_l_ic2, &lo_l, &hi_l);
+    lr2_svf_split(*io_r, &g_pan_svf_r_ic1, &g_pan_svf_r_ic2, &lo_r, &hi_r);
 
     /* 0.19 Hz ドリフトで旋回位相を ±45° 緩やかに揺らし機械的な単調さを消す */
     uint32_t drift_ph = ((uint32_t)sine_u10(g_pan_drift) - 512U) << 20;
     uint32_t ph_hi = g_pan_lfo + drift_ph;
-    uint32_t ph_lo = ph_hi + PHASE_180_DEG;
+    uint32_t ph_lo = ph_hi + PHASE_60_DEG;
 
     /* 周期ラップごとに独立ランダム目標値を更新 (Smooth Random 用) */
     if (ph_hi < g_pan_prev_hi_ph)
@@ -349,21 +458,30 @@ static void harmonic_pan_tremolo_step_48k(int32_t *io_l,
     int32_t raw_hi = eval_pan_wave_s10(ph_hi, hi_wave, g_pan_rand_hi_cur, g_pan_rand_hi_next);
     int32_t raw_lo = eval_pan_wave_s10(ph_lo, lo_wave, g_pan_rand_lo_cur, g_pan_rand_lo_next);
 
-    /* Q16 精度で τ ≒ 10.7 ms のスルー制限を掛けて折り返しクリックを除去 */
-    g_pan_mod_hi_sm += ((raw_hi << 8) - g_pan_mod_hi_sm) >> 9;
-    g_pan_mod_lo_sm += ((raw_lo << 8) - g_pan_mod_lo_sm) >> 9;
+    /* Q16 精度で τ ≒ 5.3 ms のスルー制限を掛けてキレを保ちつつ折り返しクリックを除去 */
+    g_pan_mod_hi_sm += ((raw_hi << 8) - g_pan_mod_hi_sm) >> 8;
+    g_pan_mod_lo_sm += ((raw_lo << 8) - g_pan_mod_lo_sm) >> 8;
 
     int32_t sm_hi = g_pan_mod_hi_sm >> 8; /* -512..+511 */
     int32_t sm_lo = g_pan_mod_lo_sm >> 8; /* -512..+511 */
 
-    int32_t mod_hi = (sm_hi * depth) >> 10;              /* depth=240 -> ±120 */
-    int32_t mod_lo = ((sm_lo * depth) >> 10) * 3 >> 2;   /* 低域は土台を保ちつつ ±90 */
+    /*
+     * 深いフルスイープ変調: depth=240 で mod_hi ≒ ±210, mod_lo ≒ ±184
+     * base=224 に対し最小側を 14..40 (約 -25..-16 dB) まで落とし、明確な左右移動を作る
+     */
+    int32_t mod_hi = (sm_hi * depth * 7) >> 12;
+    int32_t mod_lo = (((sm_lo * depth * 7) >> 12) * 7) >> 3;
 
-    int32_t base = 240; /* Q8: 約 0.94 を中心に 0.47..1.41 の一定パワー寄り変調 */
+    int32_t base = 224;
     int32_t g_hi_l = base + mod_hi;
     int32_t g_hi_r = base - mod_hi;
     int32_t g_lo_l = base + mod_lo;
     int32_t g_lo_r = base - mod_lo;
+
+    if (g_hi_l < 8) g_hi_l = 8;
+    if (g_hi_r < 8) g_hi_r = 8;
+    if (g_lo_l < 8) g_lo_l = 8;
+    if (g_lo_r < 8) g_lo_r = 8;
 
     *io_l = ((hi_l * g_hi_l) + (lo_l * g_lo_l)) >> 8;
     *io_r = ((hi_r * g_hi_r) + (lo_r * g_lo_r)) >> 8;
@@ -418,19 +536,23 @@ static void clear_buffers(void)
     memset(g_fdn1, 0, sizeof(g_fdn1));
     memset(g_fdn2, 0, sizeof(g_fdn2));
     memset(g_fdn3, 0, sizeof(g_fdn3));
-    memset(g_diff_l0, 0, sizeof(g_diff_l0));
-    memset(g_diff_l1, 0, sizeof(g_diff_l1));
-    memset(g_diff_r0, 0, sizeof(g_diff_r0));
-    memset(g_diff_r1, 0, sizeof(g_diff_r1));
+    memset(g_pdiff0, 0, sizeof(g_pdiff0));
+    memset(g_pdiff1, 0, sizeof(g_pdiff1));
+    memset(g_pdiff2, 0, sizeof(g_pdiff2));
+    memset(g_pdiff3, 0, sizeof(g_pdiff3));
     memset(g_tap_buf, 0, sizeof(g_tap_buf));
     memset(g_cho_buf, 0, sizeof(g_cho_buf));
     memset(g_shim_buf, 0, sizeof(g_shim_buf));
 
     memset(g_fdn_idx, 0, sizeof(g_fdn_idx));
     memset(g_fdn_damp, 0, sizeof(g_fdn_damp));
-    memset(g_diff_idx, 0, sizeof(g_diff_idx));
+    memset(g_pdiff_idx, 0, sizeof(g_pdiff_idx));
 
     g_tap_wr = 0U;
+    g_tap_hp_l = 0;
+    g_tap_hp_r = 0;
+    g_tap_lp_l = 0;
+    g_tap_lp_r = 0;
     g_cho_wr = 0U;
     g_shim_wr = 0U;
     g_shim_ph = 0U;
@@ -439,8 +561,10 @@ static void clear_buffers(void)
     g_shim_dc = 0;
     g_shim_lp = 0;
     g_dim_lp = 0;
-    g_pan_lp_l = 0;
-    g_pan_lp_r = 0;
+    g_pan_svf_l_ic1 = 0;
+    g_pan_svf_l_ic2 = 0;
+    g_pan_svf_r_ic1 = 0;
+    g_pan_svf_r_ic2 = 0;
     g_pan_mod_hi_sm = 0;
     g_pan_mod_lo_sm = 0;
     g_fdn_lfo = 0UL;
@@ -448,7 +572,7 @@ static void clear_buffers(void)
     g_pan_lfo = 0UL;
     g_pan_drift = 0UL;
     g_pan_prev_hi_ph = 0UL;
-    g_pan_prev_lo_ph = PHASE_180_DEG;
+    g_pan_prev_lo_ph = PHASE_60_DEG;
     g_pan_rand_hi_cur = 0;
     g_pan_rand_hi_next = 256;
     g_pan_rand_lo_cur = 0;
@@ -499,8 +623,8 @@ const char *ambient_reverb_get_preset_name(ambient_preset_t preset)
 {
     switch (preset)
     {
-        case AMBIENT_PRESET_REVERSE_GATE:       return "1: SPX90 Reverse Gate (48kHz 32-tap FIR)";
-        case AMBIENT_PRESET_EARLY_REFLECTIONS:  return "2: SPX90 Early Reflections (48kHz 32-tap FIR)";
+        case AMBIENT_PRESET_REVERSE_GATE:       return "1: SPX90 Reverse Gate (48kHz 64-tap Diffused)";
+        case AMBIENT_PRESET_EARLY_REFLECTIONS:  return "2: SPX90 Early Reflections (48kHz 64-tap FIR)";
         case AMBIENT_PRESET_CHORUS_3PHASE:      return "3: Dimension + Harmonic Pan (Sine x Sine)";
         case AMBIENT_PRESET_PAN_CROSS_RAMP:     return "4: Dimension + Infinite Cross-Ramp (Up x Down)";
         case AMBIENT_PRESET_PAN_STARDUST:       return "5: Dimension + Stardust Pan (Rand x Sine)";
@@ -541,14 +665,10 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
     int32_t cho_g = (int32_t)params.chorus;
     uint8_t tap_mode = params.tap_mode;
 
-    /* 1) 48 kHz 32 タップ FIR + 軽い 2 段オールパス拡散 */
+    /* 1) 48 kHz 64 タップ (32+32) FIR + 前段カスケード拡散 */
     if ((tap_mode != 0U) && (tap_g > 0))
     {
         multitap_fir_step_48k(x, tap_mode, &tap_l, &tap_r);
-        tap_l = allpass_light_step(g_diff_l0, DIFF_L0_LEN, &g_diff_idx[0], tap_l);
-        tap_l = allpass_light_step(g_diff_l1, DIFF_L1_LEN, &g_diff_idx[1], tap_l);
-        tap_r = allpass_light_step(g_diff_r0, DIFF_R0_LEN, &g_diff_idx[2], tap_r);
-        tap_r = allpass_light_step(g_diff_r1, DIFF_R1_LEN, &g_diff_idx[3], tap_r);
         wet_l += ((int32_t)tap_l * tap_g) >> 8;
         wet_r += ((int32_t)tap_r * tap_g) >> 8;
     }

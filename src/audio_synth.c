@@ -67,7 +67,8 @@ static uint32_t g_ph2 = 0UL;
 static uint32_t g_ph3 = 0UL;
 static uint32_t g_glide_ph = 0UL;
 static uint32_t g_cnt = 0UL;
-static uint16_t g_env = 32767U;
+static uint16_t g_env = 0U;
+static uint8_t g_attack = 1U;
 static uint8_t g_step = 0U;
 
 void audio_synth_set_src(audio_synth_src_t src)
@@ -83,7 +84,8 @@ void audio_synth_set_src(audio_synth_src_t src)
     g_ph3 = 0UL;
     g_glide_ph = 0UL;
     g_cnt = 0UL;
-    g_env = 32767U;
+    g_env = 0U;
+    g_attack = 1U;
     g_step = 0U;
 }
 
@@ -145,7 +147,21 @@ int16_t audio_synth_next_sample(void)
             s = (s * (int32_t)g_env) >> 17;
 
             g_cnt++;
-            if ((g_cnt & 0x3FUL) == 0UL)
+            if (g_attack != 0U)
+            {
+                /* 約 18 ms の滑らかなアタックランプでコード切替クリックを防止 */
+                uint32_t next_env = (uint32_t)g_env + 28UL;
+                if (next_env >= 32767UL)
+                {
+                    g_env = 32767U;
+                    g_attack = 0U;
+                }
+                else
+                {
+                    g_env = (uint16_t)next_env;
+                }
+            }
+            else if ((g_cnt & 0x3FUL) == 0UL)
             {
                 if (g_env > 9000U)
                 {
@@ -156,7 +172,7 @@ int16_t audio_synth_next_sample(void)
             {
                 g_cnt = 0UL;
                 g_step = (uint8_t)((g_step + 1U) & 3U);
-                g_env = 32767U;
+                g_attack = 1U;
             }
             return (int16_t)s;
         }
@@ -177,7 +193,21 @@ int16_t audio_synth_next_sample(void)
             }
 
             g_cnt++;
-            if ((g_cnt & 0x07UL) == 0UL)
+            if (g_attack != 0U)
+            {
+                /* 約 3.8 ms のアタックランプでベル音の輪郭を保ちつつクリックを防止 */
+                uint32_t next_env = (uint32_t)g_env + 180UL;
+                if (next_env >= 32767UL)
+                {
+                    g_env = 32767U;
+                    g_attack = 0U;
+                }
+                else
+                {
+                    g_env = (uint16_t)next_env;
+                }
+            }
+            else if ((g_cnt & 0x07UL) == 0UL)
             {
                 g_env = (uint16_t)(((uint32_t)g_env * 32600UL) >> 15);
             }
@@ -189,7 +219,8 @@ int16_t audio_synth_next_sample(void)
                 {
                     g_step = 0U;
                 }
-                g_env = (g_step < 4U) ? 32767U : 0U;
+                g_env = 0U;
+                g_attack = (g_step < 4U) ? 1U : 0U;
                 g_ph0 = 0UL;
             }
             return (int16_t)s;
