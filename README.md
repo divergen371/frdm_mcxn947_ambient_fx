@@ -39,10 +39,12 @@ NXP **FRDM-MCXN947**（Cortex-M33 @ 150 MHz / 512 KB SRAM / SAI1 + Audio PLL1）
 4. **Dimension + Infinite Cross-Ramp (`RampUp × RampDown`)**（黄 LED）: 高域と低域が逆方向へ無限にすれ違い続ける酩酊旋回
 5. **Dimension + Stardust Pan (`SmoothRand × Sine`)**（シアン LED）: 揺れる低域の上で高域だけが星屑のようにランダム浮遊
 6. **Dimension + Psyche Chop (`SoftSquare × Sine`)**（マゼンタ LED）: 低域のうねりの上で高域が左右に跳ねるサイケ・ハーモニックパン
-7. **Shimmer Hall**（シアン LED）: 48 kHz 4×4 Hadamard FDN ＋ 42.7 ms 窓 +1 オクターブ・シマー
-8. **Shoegaze Cathedral**（マゼンタ LED）: Reverse Gate ＋ Dimension ＋ FDN ＋ シマー ＋ 緩やかなハーモニック・パンニング全部盛り
-9. **Bypass**（白 LED）: 原音比較用
-10. **Off**（消灯）: 無音（I²S クロック維持）
+7. **Shimmer Hall**（シアン LED）: 48 kHz 4×4 Hadamard FDN ＋ ノスタルジック減衰 +1 oct シマー
+8. **Shoegaze Cathedral**（マゼンタ LED）: Reverse Gate ＋ Dimension ＋ FDN ＋ ノスタルジック・シマー ＋ ハーモニック・パン全部盛り
+9. **Tension Choir Bloom**（黄 LED）: 入力アタックに反応して +1/+2 oct ＋ テンションコード（add9 / sus4 / 6-9 / m7）が開花＆グライド変態する聖歌隊シマー
+10. **Ruin Cathedral**（赤 LED）: アタックごとに地の底から maj7 ＋ 微デチューン亡霊聖歌隊 ＋ maj14/#11 が這い上がる狂気廃墟モード
+11. **Bypass**（白 LED）: 原音比較用
+12. **Off**（消灯）: 無音（I²S クロック維持）
 
 ### `SW3`（`P0_6`）: テスト原音切替
 1. **Shoegaze Glide Chord**（Fmaj7 → G6 → Asus4 → G9sus4 ＋ アーム揺らし）← 起動時

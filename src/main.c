@@ -98,6 +98,8 @@ static void update_led_for_preset(ambient_preset_t preset)
         case AMBIENT_PRESET_PAN_PSYCHE_CHOP:    board_audio_set_rgb(true,  false, true ); break; /* Magenta */
         case AMBIENT_PRESET_SHIMMER_HALL:       board_audio_set_rgb(false, true,  true ); break; /* Cyan */
         case AMBIENT_PRESET_SHOEGAZE_CATHEDRAL: board_audio_set_rgb(true,  false, true ); break; /* Magenta */
+        case AMBIENT_PRESET_TENSION_BLOOM:      board_audio_set_rgb(true,  true,  false); break; /* Gold / Yellow */
+        case AMBIENT_PRESET_RUIN_CATHEDRAL:     board_audio_set_rgb(true,  false, false); break; /* Crimson / Red */
         case AMBIENT_PRESET_BYPASS:             board_audio_set_rgb(true,  true,  true ); break; /* White */
         case AMBIENT_PRESET_OFF:
         default:                                board_audio_set_rgb(false, false, false); break; /* Off */

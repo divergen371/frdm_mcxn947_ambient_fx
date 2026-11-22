@@ -33,6 +33,8 @@ typedef struct
     uint8_t pan_rate;     /* 0..255: パンニング速度 (約 0.20..3.40 Hz) */
     uint8_t pan_hi_wave;  /* ambient_pan_wave_t: 高域パン波形 */
     uint8_t pan_lo_wave;  /* ambient_pan_wave_t: 低域パン波形 */
+    uint8_t tension;      /* 0..255: 入力反応テンション・ブルーム量 */
+    uint8_t tension_mode; /* 0: OFF, 1: Choir Bloom, 2: Ruin Cathedral (maj7 + Rising Detune Choir) */
 } ambient_params_t;
 
 typedef enum
@@ -45,6 +47,8 @@ typedef enum
     AMBIENT_PRESET_PAN_PSYCHE_CHOP,
     AMBIENT_PRESET_SHIMMER_HALL,
     AMBIENT_PRESET_SHOEGAZE_CATHEDRAL,
+    AMBIENT_PRESET_TENSION_BLOOM,
+    AMBIENT_PRESET_RUIN_CATHEDRAL,
     AMBIENT_PRESET_BYPASS,
     AMBIENT_PRESET_OFF,
     AMBIENT_PRESET_COUNT
