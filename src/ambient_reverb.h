@@ -34,7 +34,7 @@ typedef struct
     uint8_t pan_hi_wave;  /* ambient_pan_wave_t: 高域パン波形 */
     uint8_t pan_lo_wave;  /* ambient_pan_wave_t: 低域パン波形 */
     uint8_t tension;      /* 0..255: 入力反応テンション・ブルーム量 */
-    uint8_t tension_mode; /* 0: OFF, 1: Choir Bloom, 2: Ruin Cathedral (maj7 + Rising Detune Choir) */
+    uint8_t tension_mode; /* 0: OFF, 1: Choir Bloom, 2: Ruin Cathedral (Floating Ghost Choir) */
 } ambient_params_t;
 
 typedef enum

@@ -47,6 +47,8 @@
 /* LFO 位相増分 @ 48 kHz: round(f * 2^32 / 48000) */
 #define FDN_LFO_INC        40265UL     /* 約 0.45 Hz */
 #define SHIM_WOW_INC       25054UL     /* 0.28 Hz (3.57 秒周期: テープワウ風の儚い揺らぎ) */
+#define GHOST_LFO_A_INC    15211UL     /* 0.17 Hz (5.88 秒周期: 浮遊霊の緩やかな漂い) */
+#define GHOST_LFO_B_INC    19685UL     /* 0.22 Hz (4.55 秒周期: 非同期にすれ違う浮遊周期) */
 #define DIM_LFO_INC        29528UL     /* 0.33 Hz (3.03 秒周期: DC-2 風 揺れない逆相ペア) */
 #define PAN_RATE_MIN_INC   17896UL     /* 0.20 Hz (pan_rate = 0) */
 #define PAN_RATE_STEP_INC  1120UL      /* pan_rate 1 刻みあたり +0.0125 Hz (255 で約 3.39 Hz) */
@@ -118,6 +120,8 @@ static uint16_t g_cho_wr = 0U;
 static uint16_t g_shim_wr = 0U;
 static uint32_t g_shim_ph_q8 = 0UL;
 static uint32_t g_shim_wow_lfo = 0UL;
+static uint32_t g_ghost_lfo_a = 0UL;
+static uint32_t g_ghost_lfo_b = 0UL;
 static uint32_t g_tvoice_ph_q8[3] = { 0UL, 0UL, 0UL };
 static int32_t g_tvoice_inc_q16[3] = { 128 << 8, 320 << 8, 765 << 8 };
 static int32_t g_env_fast = 0;
@@ -169,7 +173,7 @@ static const ambient_params_t g_preset_table[AMBIENT_PRESET_COUNT] = {
     { 236U, 130U,   0U,   0U, 190U, 0U,   0U,  36U, PAN_WAVE_SINE,          PAN_WAVE_SINE,        0U, 0U }, /* SHIMMER_HALL */
     { 234U, 155U, 215U, 125U, 175U, 1U, 180U,  32U, PAN_WAVE_SINE,          PAN_WAVE_SINE,        0U, 0U }, /* SHOEGAZE_CATHEDRAL */
     { 236U, 175U, 195U, 135U, 180U, 1U, 155U,  28U, PAN_WAVE_SINE,          PAN_WAVE_SINE,      250U, 1U }, /* TENSION_BLOOM */
-    { 240U, 185U, 215U, 150U, 185U, 1U, 175U,  22U, PAN_WAVE_RAMP_UP,       PAN_WAVE_SINE,      255U, 2U }, /* RUIN_CATHEDRAL */
+    { 240U, 185U, 215U, 150U, 185U, 1U, 175U,  22U, PAN_WAVE_SMOOTH_RANDOM, PAN_WAVE_SINE,      255U, 2U }, /* RUIN_CATHEDRAL */
     {   0U,   0U,   0U,   0U,   0U, 0U,   0U,   0U, PAN_WAVE_SINE,          PAN_WAVE_SINE,        0U, 0U }, /* BYPASS */
     {   0U,   0U,   0U,   0U,   0U, 0U,   0U,   0U, PAN_WAVE_SINE,          PAN_WAVE_SINE,        0U, 0U }  /* OFF */
 };
@@ -604,7 +608,7 @@ static inline int32_t shim_voice_eval(uint32_t *p_ph_q8, uint32_t inc_q8)
  * 入力エンベロープ・アタック検出 & ボイシング変態エンジン
  * - mode == 1 (Choir Bloom): add9 / sus4 / 6-9 / m7 を軽く下からすくい上げてポルタメント着地
  * - mode == 2 (Ruin Cathedral): maj7 + 微デチューン亡霊聖歌隊 + maj14/#11 を、
- *   アタックのたびに地の底 (原音近傍) から約 0.9 秒かけて天窓へ這い上がらせる
+ *   立ち上げグリッサンド無しで中空に漂わせ、ボイシング間のみ緩やかに渡り歩かせる
  */
 static int32_t update_tension_bloom_48k(int32_t x_in, uint8_t tension_mode)
 {
@@ -657,20 +661,17 @@ static int32_t update_tension_bloom_48k(int32_t x_in, uint8_t tension_mode)
         (g_env_fast > (g_env_slow + (g_env_peak >> 2))))
     {
         g_tension_voicing = (uint8_t)((g_tension_voicing + 1U) & 3U);
-        const int16_t *tgt = voicing_tbl[g_tension_voicing];
 
         if (tension_mode == 2U)
         {
-            /* Ruin Cathedral: 地の底 (ユニゾン近傍〜低音域) から天窓へ壮大に這い上がる */
-            g_tvoice_inc_q16[0] = 12 << 8;
-            g_tvoice_inc_q16[1] = 28 << 8;
-            g_tvoice_inc_q16[2] = 85 << 8;
+            /* Ruin Cathedral: 低域リセットを行わず、現在漂っている音高から次の亡霊和音へ静かに移ろう */
             g_atk_hold = 19200U;   /* 400 ms */
-            g_bloom_hold = 26400U; /* 550 ms 上昇行程の間しっかり開花保持 */
+            g_bloom_hold = 26400U; /* 550 ms 浮遊霊の滞留保持 */
         }
         else
         {
             /* Choir Bloom: 少し下からすくい上げるクワイア・グライド (元の P9 仕様) */
+            const int16_t *tgt = voicing_tbl[g_tension_voicing];
             g_tvoice_inc_q16[0] = ((int32_t)tgt[0] - 20) << 8;
             g_tvoice_inc_q16[1] = ((int32_t)tgt[1] - 28) << 8;
             g_tvoice_inc_q16[2] = ((int32_t)tgt[2] - 40) << 8;
@@ -693,15 +694,17 @@ static int32_t update_tension_bloom_48k(int32_t x_in, uint8_t tension_mode)
 
     if (target_q16 > g_bloom_q16)
     {
-        g_bloom_q16 += (target_q16 - g_bloom_q16) >> 13;
+        uint8_t atk_shift = (tension_mode == 2U) ? 14U : 13U; /* Ruin: 霧から滲み出る浮遊アタック */
+        g_bloom_q16 += (target_q16 - g_bloom_q16) >> atk_shift;
     }
     else
     {
-        g_bloom_q16 += (target_q16 - g_bloom_q16) >> 15;
+        uint8_t rel_shift = (tension_mode == 2U) ? 16U : 15U; /* Ruin: 消え残る浮遊サステイン */
+        g_bloom_q16 += (target_q16 - g_bloom_q16) >> rel_shift;
     }
 
     const int16_t *tgt = voicing_tbl[g_tension_voicing];
-    uint8_t glide_shift = (tension_mode == 2U) ? 14U : 12U; /* Ruin: τ≒341ms / Bloom: τ≒85ms */
+    uint8_t glide_shift = (tension_mode == 2U) ? 15U : 12U; /* Ruin: τ≒683ms 浮遊ドリフト / Bloom: τ≒85ms */
     for (uint8_t k = 0U; k < 3U; k++)
     {
         int32_t diff = ((int32_t)tgt[k] << 8) - g_tvoice_inc_q16[k];
@@ -720,7 +723,7 @@ static int32_t update_tension_bloom_48k(int32_t x_in, uint8_t tension_mode)
  * 48 kHz / 24-bit ノスタルジック & 4 ボイス変態テンション・シマー
  * - tension_mode == 0: 微弱フラット (-10 cents) + 0.28 Hz テープワウの儚い単一 +1 oct
  * - tension_mode == 1 (Choir Bloom): +1 oct 軸 + 9th/sus4/6-9/m7 クワイアグライド開花
- * - tension_mode == 2 (Ruin Cathedral): 深い亡霊デチューン聖歌隊 + maj7/maj14/#11 下から這い上がり
+ * - tension_mode == 2 (Ruin Cathedral): 中空を非同期に漂う浮遊霊デチューン聖歌隊 + maj7/maj14/#11
  */
 static void shimmer_poly_step_48k(int32_t in,
                                   int32_t x_in,
@@ -729,10 +732,18 @@ static void shimmer_poly_step_48k(int32_t in,
                                   int32_t *out_l,
                                   int32_t *out_r)
 {
-    int32_t wow = ((int32_t)sine_u10(g_shim_wow_lfo) - 512) >> 8; /* -2..+1 */
+    int32_t wow_s10 = (int32_t)sine_u10(g_shim_wow_lfo) - 512;
+    int32_t wow = wow_s10 >> 8; /* -2..+1 */
     g_shim_wow_lfo += SHIM_WOW_INC;
 
-    uint32_t base_inc = (tension_mode == 2U) ? (uint32_t)(251 + (wow * 2)) : (uint32_t)(253 + wow);
+    int32_t g_a_s10 = (int32_t)sine_u10(g_ghost_lfo_a) - 512;
+    int32_t g_b_s10 = (int32_t)sine_u10(g_ghost_lfo_b) - 512;
+    g_ghost_lfo_a += GHOST_LFO_A_INC;
+    g_ghost_lfo_b += GHOST_LFO_B_INC;
+
+    uint32_t base_inc = (tension_mode == 2U)
+                      ? (uint32_t)(252 + ((wow_s10 + g_a_s10) >> 8))
+                      : (uint32_t)(253 + wow);
     int32_t v0 = shim_voice_eval(&g_shim_ph_q8, base_inc);
 
     if ((tension == 0U) || (tension_mode == 0U))
@@ -748,10 +759,25 @@ static void shimmer_poly_step_48k(int32_t in,
     int32_t t_gain_q8 = (bloom_q10 * (int32_t)tension) >> 10;
     int32_t crown_q8 = (((bloom_q10 * bloom_q10) >> 10) * (int32_t)tension) >> 10;
 
-    int32_t det = (tension_mode == 2U) ? (wow * 3) : wow;
-    uint32_t inc1 = (uint32_t)((g_tvoice_inc_q16[0] >> 8) + det);
-    uint32_t inc2 = (uint32_t)((g_tvoice_inc_q16[1] >> 8) - det);
-    uint32_t inc3 = (uint32_t)((g_tvoice_inc_q16[2] >> 8) + (det * 2));
+    uint32_t inc1;
+    uint32_t inc2;
+    uint32_t inc3;
+    if (tension_mode == 2U)
+    {
+        /* 3 本の非同期 LFO 合成で各声部が別々の気流に乗って無重力に漂う */
+        int32_t float1 = (g_a_s10 * 5 + wow_s10 * 2) >> 9; /* 約 -7..+7 */
+        int32_t float2 = (g_b_s10 * 5 - g_a_s10 * 2) >> 9; /* 約 -7..+7 */
+        int32_t float3 = (wow_s10 * 6 - g_b_s10 * 4) >> 8; /* 約 -20..+20 (+2 oct 帯で ±18 cents) */
+        inc1 = (uint32_t)((g_tvoice_inc_q16[0] >> 8) + float1);
+        inc2 = (uint32_t)((g_tvoice_inc_q16[1] >> 8) + float2);
+        inc3 = (uint32_t)((g_tvoice_inc_q16[2] >> 8) + float3);
+    }
+    else
+    {
+        inc1 = (uint32_t)((g_tvoice_inc_q16[0] >> 8) + wow);
+        inc2 = (uint32_t)((g_tvoice_inc_q16[1] >> 8) - wow);
+        inc3 = (uint32_t)((g_tvoice_inc_q16[2] >> 8) + (wow * 2));
+    }
 
     int32_t v1 = shim_voice_eval(&g_tvoice_ph_q8[0], inc1);
     int32_t v2 = shim_voice_eval(&g_tvoice_ph_q8[1], inc2);
@@ -818,12 +844,23 @@ static void clear_buffers(void)
     g_shim_wr = 0U;
     g_shim_ph_q8 = 0UL;
     g_shim_wow_lfo = 0UL;
+    g_ghost_lfo_a = 0x55555555UL;
+    g_ghost_lfo_b = 0xAAAAAAAAUL;
     g_tvoice_ph_q8[0] = 0UL;
     g_tvoice_ph_q8[1] = 0x20000UL;
     g_tvoice_ph_q8[2] = 0x40000UL;
-    g_tvoice_inc_q16[0] = 128 << 8;
-    g_tvoice_inc_q16[1] = 320 << 8;
-    g_tvoice_inc_q16[2] = 765 << 8;
+    if (g_params.tension_mode == 2U)
+    {
+        g_tvoice_inc_q16[0] = 224 << 8;
+        g_tvoice_inc_q16[1] = 261 << 8;
+        g_tvoice_inc_q16[2] = 704 << 8;
+    }
+    else
+    {
+        g_tvoice_inc_q16[0] = 128 << 8;
+        g_tvoice_inc_q16[1] = 320 << 8;
+        g_tvoice_inc_q16[2] = 765 << 8;
+    }
     g_env_fast = 0;
     g_env_slow = 0;
     g_env_peak = 65536;
@@ -909,7 +946,7 @@ const char *ambient_reverb_get_preset_name(ambient_preset_t preset)
         case AMBIENT_PRESET_SHIMMER_HALL:       return "7: 4x4 Hadamard FDN + Shimmer";
         case AMBIENT_PRESET_SHOEGAZE_CATHEDRAL: return "8: Shoegaze Cathedral (All-in 48kHz)";
         case AMBIENT_PRESET_TENSION_BLOOM:      return "9: Tension Choir Bloom (+1/+2oct & 9th/sus4)";
-        case AMBIENT_PRESET_RUIN_CATHEDRAL:     return "10: Ruin Cathedral (maj7 + Rising Detune Choir)";
+        case AMBIENT_PRESET_RUIN_CATHEDRAL:     return "10: Ruin Cathedral (Floating Ghost Choir)";
         case AMBIENT_PRESET_BYPASS:             return "11: Bypass (Dry)";
         case AMBIENT_PRESET_OFF:                return "12: Mute / Off";
         default:                                return "Unknown";

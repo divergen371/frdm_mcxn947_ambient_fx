@@ -42,7 +42,7 @@ NXP **FRDM-MCXN947**（Cortex-M33 @ 150 MHz / 512 KB SRAM / SAI1 + Audio PLL1）
 7. **Shimmer Hall**（シアン LED）: 48 kHz 4×4 Hadamard FDN ＋ ノスタルジック減衰 +1 oct シマー
 8. **Shoegaze Cathedral**（マゼンタ LED）: Reverse Gate ＋ Dimension ＋ FDN ＋ ノスタルジック・シマー ＋ ハーモニック・パン全部盛り
 9. **Tension Choir Bloom**（黄 LED）: 入力アタックに反応して +1/+2 oct ＋ テンションコード（add9 / sus4 / 6-9 / m7）が開花＆グライド変態する聖歌隊シマー
-10. **Ruin Cathedral**（赤 LED）: アタックごとに地の底から maj7 ＋ 微デチューン亡霊聖歌隊 ＋ maj14/#11 が這い上がる狂気廃墟モード
+10. **Ruin Cathedral**（赤 LED）: 立ち上げグリッサンド無しで maj7 ＋ 非同期デチューン浮遊霊聖歌隊 ＋ maj14/#11 が中空を漂う廃墟聖堂モード
 11. **Bypass**（白 LED）: 原音比較用
 12. **Off**（消灯）: 無音（I²S クロック維持）
 
