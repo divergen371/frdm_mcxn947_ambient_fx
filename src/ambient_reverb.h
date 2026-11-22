@@ -55,6 +55,7 @@ void ambient_reverb_set_preset(ambient_preset_t preset);
 void ambient_reverb_set_params(const ambient_params_t *params);
 const char *ambient_reverb_get_preset_name(ambient_preset_t preset);
 const char *ambient_reverb_get_pan_wave_name(ambient_pan_wave_t wave);
+void ambient_reverb_process_stereo_q23(int32_t x, int32_t *out_l, int32_t *out_r);
 void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r);
 
 #endif /* AMBIENT_REVERB_H */

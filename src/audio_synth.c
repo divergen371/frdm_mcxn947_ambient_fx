@@ -4,6 +4,7 @@
  */
 
 #include "audio_synth.h"
+#include <stdbool.h>
 
 /* 32-bit 位相増分 = round(f * 2^32 / 48000) */
 #define PHASE_INC_F3 15624260UL
@@ -22,7 +23,7 @@
 
 #define ARP_STEP_SAMPLES 12000UL   /* 0.25 秒 / 音 */
 #define GAZE_BAR_SAMPLES 120000UL  /* 2.50 秒ごとにコードチェンジ */
-#define GAZE_GLIDE_INC   40265UL   /* 約 0.45 Hz アーム揺らし */
+#define GAZE_GLIDE_INC   76056UL   /* 約 0.85 Hz アーム揺らし (減衰中に約 2 往復) */
 
 /* 256 点サイン波テーブル (振幅 2048 ≒ -24 dBFS) */
 static const int16_t g_sine_lut[256] = {
@@ -61,10 +62,10 @@ static const int16_t g_sine_lut[256] = {
 };
 
 static volatile audio_synth_src_t g_src = SYNTH_SRC_SHOEGAZE_GLIDE;
-static uint32_t g_ph0 = 0UL;
-static uint32_t g_ph1 = 0UL;
-static uint32_t g_ph2 = 0UL;
-static uint32_t g_ph3 = 0UL;
+static uint32_t g_ph[4] = { 0UL, 0UL, 0UL, 0UL };
+static uint32_t g_v_freq[4] = { PHASE_INC_F3, PHASE_INC_C4, PHASE_INC_E4, PHASE_INC_A4 };
+static uint16_t g_v_env[4] = { 0U, 0U, 0U, 0U };
+static uint8_t g_v_atk[4] = { 0U, 0U, 0U, 0U };
 static uint32_t g_glide_ph = 0UL;
 static uint32_t g_cnt = 0UL;
 static uint16_t g_env = 0U;
@@ -78,10 +79,16 @@ void audio_synth_set_src(audio_synth_src_t src)
         src = SYNTH_SRC_SHOEGAZE_GLIDE;
     }
     g_src = src;
-    g_ph0 = 0UL;
-    g_ph1 = 0UL;
-    g_ph2 = 0UL;
-    g_ph3 = 0UL;
+    for (uint8_t i = 0U; i < 4U; i++)
+    {
+        g_ph[i] = 0UL;
+        g_v_env[i] = 0U;
+        g_v_atk[i] = 0U;
+    }
+    g_v_freq[0] = PHASE_INC_F3;
+    g_v_freq[1] = PHASE_INC_C4;
+    g_v_freq[2] = PHASE_INC_E4;
+    g_v_freq[3] = PHASE_INC_A4;
     g_glide_ph = 0UL;
     g_cnt = 0UL;
     g_env = 0U;
@@ -117,64 +124,74 @@ int16_t audio_synth_next_sample(void)
                 { PHASE_INC_A3, PHASE_INC_D4, PHASE_INC_E4, PHASE_INC_A4 }, /* Asus4 */
                 { PHASE_INC_G3, PHASE_INC_C4, PHASE_INC_F4, PHASE_INC_A4 }, /* G9sus4 (sus9) */
             };
+            /* 低音弦から高音弦へ 18 ms 刻み (計 54 ms) のダウンストローク・ストラム */
+            static const uint32_t strum_at[4] = { 0UL, 864UL, 1728UL, 2592UL };
+            /* 低音弦ほど長く、高音弦ほど早めに自然減衰 (64 サンプルごとの Q15 減衰係数) */
+            static const uint32_t decay_q15[4] = { 32732UL, 32724UL, 32718UL, 32710UL };
+
+            /* 滑らかなトレモロアーム曲線 (0..1023 -> 最大約 -83 cents のジャズマスター風グライド) */
             uint16_t gp = (uint16_t)(g_glide_ph >> 21);
-            uint16_t bend = (gp < 1024U) ? gp : (uint16_t)(2047U - gp);
+            uint16_t tri = (gp < 1024U) ? gp : (uint16_t)(2047U - gp);
+            /* 押し込みを強調する軽い S 字カーブ: (3*t^2 - 2*t^3) の簡易近似として t*(2048-t)>>10 と併用 */
+            uint32_t bend = ((uint32_t)tri * (uint32_t)tri) >> 10; /* 0..1022: 戻りは安定、押し込みが深い */
             const uint32_t *chord = gaze_chords[g_step & 3U];
-            uint32_t f0 = chord[0];
-            uint32_t f1 = chord[1];
-            uint32_t f2 = chord[2];
-            uint32_t f3 = chord[3];
-            int32_t s;
+            bool do_decay = ((g_cnt & 0x3FUL) == 0UL);
+            int32_t mix = 0;
 
-            f0 -= (f0 >> 15) * (uint32_t)bend;
-            f1 -= (f1 >> 15) * (uint32_t)bend;
-            f2 -= (f2 >> 15) * (uint32_t)bend;
-            f3 -= (f3 >> 15) * (uint32_t)bend;
+            for (uint8_t i = 0U; i < 4U; i++)
+            {
+                /* 各弦のストラム時刻でコード周波数を切替え、滑らかなピックアタックを開始 */
+                if (g_cnt == strum_at[i])
+                {
+                    g_v_freq[i] = chord[i];
+                    g_v_atk[i] = 1U;
+                }
 
-            s = (int32_t)g_sine_lut[(uint8_t)(g_ph0 >> 24)]
-              + (int32_t)g_sine_lut[(uint8_t)(g_ph1 >> 24)]
-              + (int32_t)g_sine_lut[(uint8_t)(g_ph2 >> 24)]
-              + (int32_t)g_sine_lut[(uint8_t)(g_ph3 >> 24)]
-              + ((int32_t)g_sine_lut[(uint8_t)(g_ph0 >> 23)] >> 2)
-              + ((int32_t)g_sine_lut[(uint8_t)(g_ph2 >> 23)] >> 2);
+                uint32_t f = g_v_freq[i];
+                f -= (((f >> 15) * bend) * 3UL) >> 1;
 
-            g_ph0 += f0;
-            g_ph1 += f1;
-            g_ph2 += f2;
-            g_ph3 += f3;
+                uint32_t ph = g_ph[i];
+                int32_t fund = (int32_t)g_sine_lut[(uint8_t)(ph >> 24)];
+                int32_t h2 = (int32_t)g_sine_lut[(uint8_t)(ph >> 23)];
+                int32_t h3 = (int32_t)g_sine_lut[(uint8_t)((ph * 3UL) >> 24)];
+                g_ph[i] = ph + f;
+
+                /* ピッキング直後は倍音が明るく鳴り、減衰とともに基音中心の丸い音へ変化 (env^2) */
+                int32_t env = (int32_t)g_v_env[i];
+                int32_t h_env = (env * env) >> 15;
+                int32_t voice = ((fund * env) >> 15)
+                              + (((h2 * 3 + h3) * h_env) >> 18);
+                mix += voice;
+
+                if (g_v_atk[i] != 0U)
+                {
+                    /* 約 6.2 ms の滑らかなピックアタック (クリックゼロ) */
+                    uint32_t next_env = (uint32_t)g_v_env[i] + 110UL;
+                    if (next_env >= 32767UL)
+                    {
+                        g_v_env[i] = 32767U;
+                        g_v_atk[i] = 0U;
+                    }
+                    else
+                    {
+                        g_v_env[i] = (uint16_t)next_env;
+                    }
+                }
+                else if (do_decay && (g_v_env[i] > 0U))
+                {
+                    g_v_env[i] = (uint16_t)(((uint32_t)g_v_env[i] * decay_q15[i]) >> 15);
+                }
+            }
+
             g_glide_ph += GAZE_GLIDE_INC;
-
-            s = (s * (int32_t)g_env) >> 17;
-
             g_cnt++;
-            if (g_attack != 0U)
-            {
-                /* 約 18 ms の滑らかなアタックランプでコード切替クリックを防止 */
-                uint32_t next_env = (uint32_t)g_env + 28UL;
-                if (next_env >= 32767UL)
-                {
-                    g_env = 32767U;
-                    g_attack = 0U;
-                }
-                else
-                {
-                    g_env = (uint16_t)next_env;
-                }
-            }
-            else if ((g_cnt & 0x3FUL) == 0UL)
-            {
-                if (g_env > 9000U)
-                {
-                    g_env = (uint16_t)(((uint32_t)g_env * 32650UL) >> 15);
-                }
-            }
             if (g_cnt >= GAZE_BAR_SAMPLES)
             {
                 g_cnt = 0UL;
                 g_step = (uint8_t)((g_step + 1U) & 3U);
-                g_attack = 1U;
+                g_glide_ph = 0UL; /* ストラム直後に原音ピッチからグッとアームダウンが始まる */
             }
-            return (int16_t)s;
+            return (int16_t)(mix >> 2);
         }
 
         case SYNTH_SRC_PLUCK_ARP:
@@ -186,9 +203,9 @@ int16_t audio_synth_next_sample(void)
 
             if (g_step < 4U)
             {
-                s = (int32_t)g_sine_lut[(uint8_t)(g_ph0 >> 24)]
-                  + ((int32_t)g_sine_lut[(uint8_t)(g_ph0 >> 23)] >> 2);
-                g_ph0 += arp_inc[g_step];
+                s = (int32_t)g_sine_lut[(uint8_t)(g_ph[0] >> 24)]
+                  + ((int32_t)g_sine_lut[(uint8_t)(g_ph[0] >> 23)] >> 2);
+                g_ph[0] += arp_inc[g_step];
                 s = (s * (int32_t)g_env) >> 15;
             }
 
@@ -221,7 +238,7 @@ int16_t audio_synth_next_sample(void)
                 }
                 g_env = 0U;
                 g_attack = (g_step < 4U) ? 1U : 0U;
-                g_ph0 = 0UL;
+                g_ph[0] = 0UL;
             }
             return (int16_t)s;
         }
@@ -229,9 +246,9 @@ int16_t audio_synth_next_sample(void)
         case SYNTH_SRC_SAW_220:
         default:
         {
-            int16_t saw = (int16_t)((uint16_t)(g_ph0 >> 20)) - 2048;
+            int16_t saw = (int16_t)((uint16_t)(g_ph[0] >> 20)) - 2048;
             saw = (int16_t)((saw * 3) >> 2);
-            g_ph0 += PHASE_INC_A3;
+            g_ph[0] += PHASE_INC_A3;
             return saw;
         }
     }

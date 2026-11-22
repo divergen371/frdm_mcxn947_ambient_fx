@@ -1,10 +1,11 @@
 /**
  * @file ambient_reverb.c
- * @brief FRDM-MCXN947 48 kHz フルレート・間引きゼロ版 アンビエント／シューゲイザー DSP エンジン
+ * @brief FRDM-MCXN947 48 kHz / 24-bit Q23 フルレート アンビエント／シューゲイザー DSP エンジン
  *
- * 512 KB SRAM の余裕を活かし、dsPIC33CK 版で行っていた 16 kHz / 8 kHz 間引きを撤廃。
- * すべての段 (32 タップ FIR / 4 段オールパス拡散 / 4x4 Hadamard FDN / 3 相 6 Hz コーラス / +1oct シマー)
- * を 48,000 Hz フル帯域・独立バッファで動作させる。
+ * 512 KB SRAM の余裕を活かし、全ディレイバッファと全内部演算を符号付き 24-bit (Q23: ±8,388,607) 化。
+ * 入力最前段 25 Hz DC ブロッカ、内部 -6 dB ヘッドルーム、Shimmer ソフトサチュレータ、
+ * および最終段 -2.5 dBFS ニー付きソフトリミッタにより、PCM1808 経由のギター強ピッキング入力でも
+ * 音質崩壊・デジタルクリップを防ぎつつ PCM5102A の 24-bit ダイナミックレンジをフル活用する。
  */
 
 #include "ambient_reverb.h"
@@ -36,13 +37,22 @@
 #define SHIM_BUF_SIZE    2048U
 #define SHIM_BUF_MASK    (SHIM_BUF_SIZE - 1U)
 
+/* 24-bit Q23 範囲およびソフトリミッタ／サチュレータ閾値 */
+#define Q23_MAX          8388607
+#define Q23_MIN          (-8388608)
+#define SHIM_SAT_THRESH  2621440    /* 内部 -10 dBFS (出力換算 -4 dBFS 相当) の滑らか飽和閾値 */
+#define OUT_LIM_KNEE     6291456    /* 0.75 * 2^23 (-2.5 dBFS): ここまでは完全リニア */
+#define OUT_LIM_ROOM     2097151    /* 0.25 * 2^23: 0 dBFS へ漸近圧縮するヘッドルーム */
+
 /* LFO 位相増分 @ 48 kHz: round(f * 2^32 / 48000) */
 #define FDN_LFO_INC        40265UL     /* 約 0.45 Hz */
+#define SHIM_WOW_INC       25054UL     /* 0.28 Hz (3.57 秒周期: テープワウ風の儚い揺らぎ) */
 #define DIM_LFO_INC        29528UL     /* 0.33 Hz (3.03 秒周期: DC-2 風 揺れない逆相ペア) */
 #define PAN_RATE_MIN_INC   17896UL     /* 0.20 Hz (pan_rate = 0) */
 #define PAN_RATE_STEP_INC  1120UL      /* pan_rate 1 刻みあたり +0.0125 Hz (255 で約 3.39 Hz) */
-/* ハーモニック・パンニング 2 次 Linkwitz-Riley (LR2) TPT SVF 係数 (fc = 600 Hz @ 48 kHz, Q28) */
 #define PAN_DRIFT_INC      17001UL     /* 0.19 Hz (5.26 秒周期: テンポ揺らぎによる酩酊感) */
+
+/* ハーモニック・パンニング 2 次 Linkwitz-Riley (LR2) TPT SVF 係数 (fc = 600 Hz @ 48 kHz, Q28) */
 #define PAN_SVF_A1_Q28     248522831LL /* 1 / (1 + g*(g + 2)), g = tan(pi*600/48000) */
 #define PAN_SVF_A2_Q28     9764489LL   /* g * a1 */
 #define PAN_SVF_A3_Q28     383648LL    /* g * a2 */
@@ -82,19 +92,20 @@ static const int16_t g_gain_early_ref[TAP_COUNT] = {
       43,  -38,  -33,   28,  -24,   21,   19,  -18
 };
 
-/* 静的ディレイバッファ (合計 約 63 KB / 512 KB SRAM) */
-static int16_t g_fdn0[FDN_LEN_0];
-static int16_t g_fdn1[FDN_LEN_1];
-static int16_t g_fdn2[FDN_LEN_2];
-static int16_t g_fdn3[FDN_LEN_3];
-static int16_t g_pdiff0[PDIFF0_LEN];
-static int16_t g_pdiff1[PDIFF1_LEN];
-static int16_t g_pdiff2[PDIFF2_LEN];
-static int16_t g_pdiff3[PDIFF3_LEN];
-static int16_t g_tap_buf[TAP_BUF_SIZE];
-static int16_t g_cho_buf[CHO_BUF_SIZE];
-static int16_t g_shim_buf[SHIM_BUF_SIZE];
+/* 24-bit Q23 静的ディレイバッファ (合計 約 119 KB / 312 KB m_data) */
+static int32_t g_fdn0[FDN_LEN_0];
+static int32_t g_fdn1[FDN_LEN_1];
+static int32_t g_fdn2[FDN_LEN_2];
+static int32_t g_fdn3[FDN_LEN_3];
+static int32_t g_pdiff0[PDIFF0_LEN];
+static int32_t g_pdiff1[PDIFF1_LEN];
+static int32_t g_pdiff2[PDIFF2_LEN];
+static int32_t g_pdiff3[PDIFF3_LEN];
+static int32_t g_tap_buf[TAP_BUF_SIZE];
+static int32_t g_cho_buf[CHO_BUF_SIZE];
+static int32_t g_shim_buf[SHIM_BUF_SIZE];
 
+static int64_t g_in_dc_q16 = 0;
 static uint16_t g_fdn_idx[4];
 static int32_t g_fdn_damp[4];
 static uint16_t g_pdiff_idx[4];
@@ -105,7 +116,8 @@ static int32_t g_tap_lp_l = 0;
 static int32_t g_tap_lp_r = 0;
 static uint16_t g_cho_wr = 0U;
 static uint16_t g_shim_wr = 0U;
-static uint16_t g_shim_ph = 0U;
+static uint32_t g_shim_ph_q8 = 0UL;
+static uint32_t g_shim_wow_lfo = 0UL;
 static int32_t g_fdn_hp = 0;
 static int32_t g_cat_cho_hp = 0;
 static int32_t g_shim_dc = 0;
@@ -137,17 +149,34 @@ static volatile ambient_params_t g_params = {
 
 static const ambient_params_t g_preset_table[AMBIENT_PRESET_COUNT] = {
     /* decay, shim, tap, cho, mix, tap_m, pan_d, pan_r, hi_wave, lo_wave */
-    { 165U,   0U, 255U,   0U, 225U, 1U,   0U,  36U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* REVERSE_GATE */
+    { 110U,   0U, 255U,   0U, 165U, 1U,   0U,  36U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* REVERSE_GATE */
     { 180U,   0U, 255U,   0U, 180U, 2U,   0U,  36U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* EARLY_REFLECTIONS */
     { 218U,   0U,   0U, 255U, 148U, 0U, 235U,  34U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* DIM + SINE/SINE */
     { 218U,   0U,   0U, 255U, 148U, 0U, 240U,  38U, PAN_WAVE_RAMP_UP,       PAN_WAVE_RAMP_DOWN }, /* DIM + CROSS-RAMP */
     { 224U,   0U,   0U, 255U, 148U, 0U, 240U,  48U, PAN_WAVE_SMOOTH_RANDOM, PAN_WAVE_SINE      }, /* DIM + STARDUST */
     { 218U,   0U,   0U, 255U, 148U, 0U, 245U,  64U, PAN_WAVE_SOFT_SQUARE,   PAN_WAVE_SINE      }, /* DIM + PSYCHE CHOP */
     { 236U, 130U,   0U,   0U, 190U, 0U,   0U,  36U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* SHIMMER_HALL */
-    { 234U, 155U, 145U, 125U, 175U, 1U, 180U,  32U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* SHOEGAZE_CATHEDRAL */
+    { 234U, 155U, 215U, 125U, 175U, 1U, 180U,  32U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* SHOEGAZE_CATHEDRAL */
     {   0U,   0U,   0U,   0U,   0U, 0U,   0U,   0U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }, /* BYPASS */
     {   0U,   0U,   0U,   0U,   0U, 0U,   0U,   0U, PAN_WAVE_SINE,          PAN_WAVE_SINE      }  /* OFF */
 };
+
+static inline int32_t clamp_s24(int32_t v)
+{
+#if defined(__clang__) && !__has_builtin(__builtin_arm_ssat)
+    if (v > Q23_MAX)
+    {
+        return Q23_MAX;
+    }
+    if (v < Q23_MIN)
+    {
+        return Q23_MIN;
+    }
+    return v;
+#else
+    return __SSAT(v, 24);
+#endif
+}
 
 static inline int16_t clamp_s16(int32_t v)
 {
@@ -164,6 +193,50 @@ static inline int16_t clamp_s16(int32_t v)
 #else
     return (int16_t)__SSAT(v, 16);
 #endif
+}
+
+/* 64-bit 中間積によるオーバーフロー安全な Q8 乗算: (a * b) >> 8 */
+static inline int32_t mul_q8(int32_t a, int32_t b)
+{
+    return (int32_t)(((int64_t)a * (int64_t)b) >> 8);
+}
+
+/* 滑らかなソフトサチュレータ (32-bit ハードウェア UDIV + SMULL で高速化) */
+static inline int32_t soft_sat_s24(int32_t v, int32_t thresh)
+{
+    uint32_t av = (v < 0) ? (uint32_t)(-(int64_t)v) : (uint32_t)v;
+    uint32_t denom = ((uint32_t)thresh + av) >> 8;
+    if (denom == 0U)
+    {
+        return 0;
+    }
+    uint32_t gain_q15 = ((uint32_t)thresh << 7) / denom;
+    if (gain_q15 > 32768U)
+    {
+        gain_q15 = 32768U;
+    }
+    int32_t mag = (int32_t)(((int64_t)av * (int64_t)gain_q15) >> 15);
+    return (v < 0) ? -mag : mag;
+}
+
+/* 最終段 -2.5 dBFS ニー付きソフトリミッタ (|v| <= -2.5 dBFS は無歪み、超過分のみ 0 dBFS へ漸近圧縮) */
+static inline int32_t soft_limit_s24(int32_t v)
+{
+    uint32_t av = (v < 0) ? (uint32_t)(-(int64_t)v) : (uint32_t)v;
+    if (av <= (uint32_t)OUT_LIM_KNEE)
+    {
+        return v;
+    }
+    uint32_t excess = av - (uint32_t)OUT_LIM_KNEE;
+    uint32_t denom = ((uint32_t)OUT_LIM_ROOM + excess) >> 8;
+    uint32_t gain_q15 = ((uint32_t)OUT_LIM_ROOM << 7) / denom;
+    if (gain_q15 > 32768U)
+    {
+        gain_q15 = 32768U;
+    }
+    int32_t comp = (int32_t)(((int64_t)excess * (int64_t)gain_q15) >> 15);
+    int32_t out = clamp_s24(OUT_LIM_KNEE + comp);
+    return (v < 0) ? -out : out;
 }
 
 static inline uint16_t tri_u10(uint32_t ph)
@@ -187,24 +260,24 @@ static inline uint16_t sine_u10(uint32_t ph)
     return (uint16_t)(512U - val);
 }
 
-static inline int16_t allpass_dense_step(int16_t *buf, uint16_t len, uint16_t *p_idx, int16_t in, int32_t g_q8)
+static inline int32_t allpass_dense_step(int32_t *buf, uint16_t len, uint16_t *p_idx, int32_t in, int32_t g_q8)
 {
     uint16_t idx = *p_idx;
-    int32_t b = (int32_t)buf[idx];
-    int32_t v = (int32_t)in + ((b * g_q8) >> 8);
-    int32_t out = b - ((v * g_q8) >> 8);
+    int32_t b = buf[idx];
+    int32_t v = in + mul_q8(b, g_q8);
+    int32_t out = b - mul_q8(v, g_q8);
 
-    buf[idx] = clamp_s16(v);
+    buf[idx] = clamp_s24(v);
     if (++idx >= len)
     {
         idx = 0U;
     }
     *p_idx = idx;
-    return clamp_s16(out);
+    return clamp_s24(out);
 }
 
 /* モジュレーション付き拡散オールパス (定常和音での静的コム共振を溶かす) */
-static inline int16_t allpass_mod_step(int16_t *buf, uint16_t len, uint16_t *p_idx, int16_t in, uint16_t mod_q8, int32_t g_q8)
+static inline int32_t allpass_mod_step(int32_t *buf, uint16_t len, uint16_t *p_idx, int32_t in, uint16_t mod_q8, int32_t g_q8)
 {
     uint16_t idx = *p_idx;
     uint16_t offset = (uint16_t)(mod_q8 >> 8);
@@ -224,29 +297,29 @@ static inline int16_t allpass_mod_step(int16_t *buf, uint16_t len, uint16_t *p_i
 
     int32_t s0 = buf[r0];
     int32_t s1 = buf[r1];
-    int32_t b = s0 + (((s1 - s0) * (int32_t)frac) >> 8);
-    int32_t v = (int32_t)in + ((b * g_q8) >> 8);
-    int32_t out = b - ((v * g_q8) >> 8);
+    int32_t b = s0 + mul_q8(s1 - s0, (int32_t)frac);
+    int32_t v = in + mul_q8(b, g_q8);
+    int32_t out = b - mul_q8(v, g_q8);
 
-    buf[idx] = clamp_s16(v);
+    buf[idx] = clamp_s24(v);
     if (++idx >= len)
     {
         idx = 0U;
     }
     *p_idx = idx;
-    return clamp_s16(out);
+    return clamp_s24(out);
 }
 
 /*
- * 48 kHz フルレート SPX90 風 64 タップ (L/R 32+32) Reverse Gate / Early Reflections
+ * 48 kHz / 24-bit フルレート SPX90 風 64 タップ (L/R 32+32) Reverse Gate / Early Reflections
  * - 前段カスケード拡散オールパスで入力を濃密な音の雲へ変えてから FIR へ書き込むことで、
  *   パタパタした粒立ちと金属的コム共振を消しつつ 255 ms ゲート端の切れ味を維持する
  * - 出力段に SPX90 風の軽いトーンシェーピング (HPF ≒ 140 Hz, LPF ≒ 10 kHz) を適用
  */
-static void multitap_fir_step_48k(int16_t in, uint8_t tap_mode, int16_t *out_l, int16_t *out_r)
+static void multitap_fir_step_48k(int32_t in, uint8_t tap_mode, int32_t *out_l, int32_t *out_r)
 {
     const int16_t *gains = (tap_mode == 1U) ? g_gain_rev_gate : g_gain_early_ref;
-    int16_t d = allpass_dense_step(g_pdiff0, PDIFF0_LEN, &g_pdiff_idx[0], in, 152);
+    int32_t d = allpass_dense_step(g_pdiff0, PDIFF0_LEN, &g_pdiff_idx[0], in, 152);
     d = allpass_dense_step(g_pdiff1, PDIFF1_LEN, &g_pdiff_idx[1], d, 152);
 
     if (tap_mode == 1U)
@@ -257,37 +330,37 @@ static void multitap_fir_step_48k(int16_t in, uint8_t tap_mode, int16_t *out_l, 
         d = allpass_mod_step(g_pdiff3, PDIFF3_LEN, &g_pdiff_idx[3], d, mod_q8, 144);
     }
 
-    int32_t sum_l = 0;
-    int32_t sum_r = 0;
+    int64_t sum_l = 0;
+    int64_t sum_r = 0;
 
     g_tap_buf[g_tap_wr] = d;
 
     for (uint8_t k = 0U; k < TAP_COUNT; k++)
     {
-        int32_t g = (int32_t)gains[k];
-        sum_l += (int32_t)g_tap_buf[(g_tap_wr - g_tap_dly_l[k]) & TAP_BUF_MASK] * g;
-        sum_r += (int32_t)g_tap_buf[(g_tap_wr - g_tap_dly_r[k]) & TAP_BUF_MASK] * g;
+        int64_t g = (int64_t)gains[k];
+        sum_l += (int64_t)g_tap_buf[(g_tap_wr - g_tap_dly_l[k]) & TAP_BUF_MASK] * g;
+        sum_r += (int64_t)g_tap_buf[(g_tap_wr - g_tap_dly_r[k]) & TAP_BUF_MASK] * g;
     }
 
     g_tap_wr = (g_tap_wr + 1U) & TAP_BUF_MASK;
 
-    int32_t raw_l = (sum_l * 7) >> 12;
-    int32_t raw_r = (sum_r * 7) >> 12;
+    int32_t raw_l = (int32_t)((sum_l * 7LL) >> 12);
+    int32_t raw_r = (int32_t)((sum_r * 7LL) >> 12);
 
     /* SPX90 風トーンシェーピング: HPF ≒ 140 Hz (5/256) + LPF ≒ 10 kHz (190/256) */
-    g_tap_hp_l += ((raw_l - g_tap_hp_l) * 5) >> 8;
-    g_tap_hp_r += ((raw_r - g_tap_hp_r) * 5) >> 8;
+    g_tap_hp_l += mul_q8(raw_l - g_tap_hp_l, 5);
+    g_tap_hp_r += mul_q8(raw_r - g_tap_hp_r, 5);
     int32_t hp_l = raw_l - g_tap_hp_l;
     int32_t hp_r = raw_r - g_tap_hp_r;
 
-    g_tap_lp_l += ((hp_l - g_tap_lp_l) * 190) >> 8;
-    g_tap_lp_r += ((hp_r - g_tap_lp_r) * 190) >> 8;
+    g_tap_lp_l += mul_q8(hp_l - g_tap_lp_l, 190);
+    g_tap_lp_r += mul_q8(hp_r - g_tap_lp_r, 190);
 
-    *out_l = clamp_s16(g_tap_lp_l);
-    *out_r = clamp_s16(g_tap_lp_r);
+    *out_l = clamp_s24(g_tap_lp_l);
+    *out_r = clamp_s24(g_tap_lp_r);
 }
 
-static inline int16_t cho_read_q8(uint32_t dly_q8)
+static inline int32_t cho_read_q8(uint32_t dly_q8)
 {
     uint16_t di = (uint16_t)(dly_q8 >> 8);
     uint16_t fr = (uint16_t)(dly_q8 & 0xFFU);
@@ -296,17 +369,16 @@ static inline int16_t cho_read_q8(uint32_t dly_q8)
     int32_t s0 = g_cho_buf[r0];
     int32_t s1 = g_cho_buf[r1];
 
-    return (int16_t)(s0 + (((s1 - s0) * (int32_t)fr) >> 8));
+    return s0 + mul_q8(s1 - s0, (int32_t)fr);
 }
 
 /*
- * 48 kHz フルレート Dimension Chorus (Roland SDD-320 / BOSS DC-2 方式, Pure Wet 出力)
+ * 48 kHz / 24-bit フルレート Dimension Chorus (Roland SDD-320 / BOSS DC-2 方式, Pure Wet 出力)
  * - フィードバック 0 の純フィードフォワード + BBD 風ローパス (fc ≒ 9.0 kHz)
  * - 0.33 Hz 逆相ペア × 2 系統 (90° 位相差, ±4.5 cents) に左右相補の +2.5 ms 中心オフセットを与え、
  *   LFO 交差点での Side 成分消滅を防ぎながら常に極ワイドな広がりを維持する
- * - Dry との合成は呼び出し側の mix で一元管理し、二重 Dry による希釈を防ぐ
  */
-static void dimension_chorus_step_48k(int16_t in, int16_t *out_l, int16_t *out_r)
+static void dimension_chorus_step_48k(int32_t in, int32_t *out_l, int32_t *out_r)
 {
     uint32_t t_a = (uint32_t)tri_u10(g_dim_lfo);
     uint32_t t_b = 1023U - t_a;
@@ -326,17 +398,17 @@ static void dimension_chorus_step_48k(int16_t in, int16_t *out_l, int16_t *out_r
     int32_t d = cho_read_q8((480UL << 8) + (t_d * 48UL));
 
     /* BBD 風ウォーム LPF (fc ≒ 9.0 kHz) を通して純フィードフォワード書き込み */
-    g_dim_lp += (((int32_t)in - g_dim_lp) * 180) >> 8;
-    g_cho_buf[g_cho_wr] = clamp_s16(g_dim_lp);
+    g_dim_lp += mul_q8(in - g_dim_lp, 180);
+    g_cho_buf[g_cho_wr] = clamp_s24(g_dim_lp);
     g_cho_wr = (g_cho_wr + 1U) & CHO_BUF_MASK;
     g_dim_lfo += DIM_LFO_INC;
 
     /* クロスブレンド (Pure Wet): Mid でピッチ相殺しつつ Side へ濃密に展開 */
-    int32_t w_l = ((a * 3) + (c * 2) - (b * 2) - d) >> 2;
-    int32_t w_r = ((b * 3) + (d * 2) - (a * 2) - c) >> 2;
+    int32_t w_l = (int32_t)(((int64_t)a * 3LL + (int64_t)c * 2LL - (int64_t)b * 2LL - (int64_t)d) >> 2);
+    int32_t w_r = (int32_t)(((int64_t)b * 3LL + (int64_t)d * 2LL - (int64_t)a * 2LL - (int64_t)c) >> 2);
 
-    *out_l = clamp_s16((w_l * 290) >> 8);
-    *out_r = clamp_s16((w_r * 290) >> 8);
+    *out_l = clamp_s24(mul_q8(w_l, 290));
+    *out_r = clamp_s24(mul_q8(w_r, 290));
 }
 
 static inline int32_t pan_rng_next_s10(void)
@@ -349,9 +421,7 @@ static inline int32_t pan_rng_next_s10(void)
     return (int32_t)(x & 1023U) - 512; /* -512..+511 */
 }
 
-/*
- * 各種パンニング LFO 波形を評価して -512..+511 (+が左寄り, -が右寄り) を返す
- */
+/* 各種パンニング LFO 波形を評価して -512..+511 (+が左寄り, -が右寄り) を返す */
 static inline int32_t eval_pan_wave_s10(uint32_t ph, uint8_t wave, int32_t r_cur, int32_t r_next)
 {
     switch ((ambient_pan_wave_t)wave)
@@ -386,7 +456,7 @@ static inline int32_t eval_pan_wave_s10(uint32_t ph, uint8_t wave, int32_t r_cur
 }
 
 /*
- * 2 次 Linkwitz-Riley (LR2) TPT SVF クロスオーバー (fc = 600 Hz @ 48 kHz, Q = 0.5)
+ * 24-bit Q23 2 次 Linkwitz-Riley (LR2) TPT SVF クロスオーバー (fc = 600 Hz @ 48 kHz, Q = 0.5)
  * - 1 本の SVF で対称な -12 dB/oct の LPF / HPF を同時出力 (600 Hz で両方 -6.02 dB)
  * - LR2 は全周波数で LPF/HPF が 180° 逆相のため、HPF 極性反転 (hi_inv) を返すことで
  *   lo + hi_inv が全帯域 0.000 dB フラット (オールパス合成) になる
@@ -397,10 +467,9 @@ static inline void lr2_svf_split(int32_t in,
                                  int32_t *out_lo,
                                  int32_t *out_hi_inv)
 {
-    int32_t x_q8 = in << 8;
     int32_t ic1 = *ic1eq;
     int32_t ic2 = *ic2eq;
-    int32_t v3 = x_q8 - ic2;
+    int32_t v3 = in - ic2;
 
     int32_t v1 = (int32_t)((((int64_t)PAN_SVF_A1_Q28 * ic1)
                           + ((int64_t)PAN_SVF_A2_Q28 * v3)
@@ -412,16 +481,15 @@ static inline void lr2_svf_split(int32_t in,
     *ic1eq = (v1 << 1) - ic1;
     *ic2eq = (v2 << 1) - ic2;
 
-    *out_lo = v2 >> 8;
-    *out_hi_inv = ((v2 + (v1 << 1)) - x_q8) >> 8;
+    *out_lo = v2;
+    *out_hi_inv = (v2 + (v1 << 1)) - in;
 }
 
 /*
- * 48 kHz フルレート 高域/低域独立波形ハーモニック・パンニング・トレモロ
+ * 48 kHz / 24-bit フルレート 高域/低域独立波形ハーモニック・パンニング・トレモロ
  * - 2 次 Linkwitz-Riley (LR2) TPT SVF クロスオーバー (-12 dB/oct, fc = 600 Hz) で低域/高域を対称分離
  * - 高域と低域それぞれに任意のカーブ波形を選択可能 (低域は 60° 位相オフセット)
- * - 波形出力へ約 5.3 ms の 1 次スムージング (>> 8) を挟み、
- *   ノコギリ波折り返しや矩形波エッジでのクリックノイズを物理的に除去する
+ * - 波形出力へ約 5.3 ms の 1 次スムージング (>> 8) を挟み、折り返しクリックを除去
  */
 static void harmonic_pan_tremolo_step_48k(int32_t *io_l,
                                           int32_t *io_r,
@@ -465,10 +533,6 @@ static void harmonic_pan_tremolo_step_48k(int32_t *io_l,
     int32_t sm_hi = g_pan_mod_hi_sm >> 8; /* -512..+511 */
     int32_t sm_lo = g_pan_mod_lo_sm >> 8; /* -512..+511 */
 
-    /*
-     * 深いフルスイープ変調: depth=240 で mod_hi ≒ ±210, mod_lo ≒ ±184
-     * base=224 に対し最小側を 14..40 (約 -25..-16 dB) まで落とし、明確な左右移動を作る
-     */
     int32_t mod_hi = (sm_hi * depth * 7) >> 12;
     int32_t mod_lo = (((sm_lo * depth * 7) >> 12) * 7) >> 3;
 
@@ -483,32 +547,59 @@ static void harmonic_pan_tremolo_step_48k(int32_t *io_l,
     if (g_lo_l < 8) g_lo_l = 8;
     if (g_lo_r < 8) g_lo_r = 8;
 
-    *io_l = ((hi_l * g_hi_l) + (lo_l * g_lo_l)) >> 8;
-    *io_r = ((hi_r * g_hi_r) + (lo_r * g_lo_r)) >> 8;
+    *io_l = (int32_t)((((int64_t)hi_l * g_hi_l) + ((int64_t)lo_l * g_lo_l)) >> 8);
+    *io_r = (int32_t)((((int64_t)hi_r * g_hi_r) + ((int64_t)lo_r * g_lo_r)) >> 8);
 
     g_pan_lfo += PAN_RATE_MIN_INC + ((uint32_t)rate * PAN_RATE_STEP_INC);
     g_pan_drift += PAN_DRIFT_INC;
 }
 
-/* 48 kHz フルレート 42.7 ms 窓 +1 オクターブ・シマー (クリックレス三角窓) */
-static int16_t shimmer_step_48k(int16_t in)
+static inline int32_t shim_read_q8(uint32_t dly_q8)
 {
-    uint16_t d_a = (SHIM_BUF_SIZE - 1U) - g_shim_ph;
-    uint16_t d_b = (d_a + (SHIM_BUF_SIZE >> 1)) & SHIM_BUF_MASK;
-    uint16_t w_a = (d_a < (SHIM_BUF_SIZE >> 1)) ? d_a : ((SHIM_BUF_SIZE - 1U) - d_a);
+    uint16_t di = (uint16_t)(dly_q8 >> 8);
+    uint16_t fr = (uint16_t)(dly_q8 & 0xFFU);
+    uint16_t r0 = (g_shim_wr - di) & SHIM_BUF_MASK;
+    uint16_t r1 = (r0 - 1U) & SHIM_BUF_MASK;
+    int32_t s0 = g_shim_buf[r0];
+    int32_t s1 = g_shim_buf[r1];
+
+    return s0 + mul_q8(s1 - s0, (int32_t)fr);
+}
+
+/*
+ * 48 kHz / 24-bit ノスタルジック +1 オクターブ・シマー (42.7 ms クリックレス三角窓)
+ * - 厳密な +1 oct (inc=256) より微弱にフラット (-10 cents 中心, inc=253) し、
+ *   0.28 Hz の極微テープワウ (±7 cents) を重ねて古い磁気テープ／メロトロン風の切ない揺らぎを作る
+ */
+static int32_t shimmer_step_48k(int32_t in)
+{
+    const uint32_t mask_q8 = ((uint32_t)SHIM_BUF_SIZE << 8) - 1UL;
+    const uint32_t half_q8 = (uint32_t)(SHIM_BUF_SIZE >> 1) << 8;
+
+    uint32_t d_a_q8 = mask_q8 - g_shim_ph_q8;
+    uint32_t d_b_q8 = (d_a_q8 + half_q8) & mask_q8;
+
+    uint16_t d_a_i = (uint16_t)(d_a_q8 >> 8);
+    uint16_t w_a = (d_a_i < (SHIM_BUF_SIZE >> 1)) ? d_a_i : ((SHIM_BUF_SIZE - 1U) - d_a_i);
     uint16_t w_b = ((SHIM_BUF_SIZE >> 1) - 1U) - w_a;
 
-    int32_t out = ((int32_t)g_shim_buf[(g_shim_wr - d_a) & SHIM_BUF_MASK] * (int32_t)w_a)
-                + ((int32_t)g_shim_buf[(g_shim_wr - d_b) & SHIM_BUF_MASK] * (int32_t)w_b);
+    int32_t sa = shim_read_q8(d_a_q8);
+    int32_t sb = shim_read_q8(d_b_q8);
+    int64_t out = ((int64_t)sa * (int64_t)w_a) + ((int64_t)sb * (int64_t)w_b);
 
     g_shim_buf[g_shim_wr] = in;
     g_shim_wr = (g_shim_wr + 1U) & SHIM_BUF_MASK;
-    g_shim_ph = (g_shim_ph + 1U) & SHIM_BUF_MASK;
 
-    return clamp_s16(out >> 10);
+    /* 0.28 Hz テープワウ: inc = 251..255 (-17..-3 cents の儚いピッチ沈み込み) */
+    int32_t wow = ((int32_t)sine_u10(g_shim_wow_lfo) - 512) >> 8; /* -2..+1 */
+    uint32_t inc_q8 = (uint32_t)(253 + wow);
+    g_shim_ph_q8 = (g_shim_ph_q8 + inc_q8) & mask_q8;
+    g_shim_wow_lfo += SHIM_WOW_INC;
+
+    return clamp_s24((int32_t)(out >> 10));
 }
 
-static inline int16_t fdn_read_mod(const int16_t *buf, uint16_t len, uint16_t wr_idx, uint16_t mod_q8)
+static inline int32_t fdn_read_mod(const int32_t *buf, uint16_t len, uint16_t wr_idx, uint16_t mod_q8)
 {
     uint16_t offset = (uint16_t)(mod_q8 >> 8);
     uint16_t frac = (uint16_t)(mod_q8 & 0xFFU);
@@ -527,7 +618,7 @@ static inline int16_t fdn_read_mod(const int16_t *buf, uint16_t len, uint16_t wr
 
     int32_t s0 = buf[r0];
     int32_t s1 = buf[r1];
-    return (int16_t)(s0 + (((s1 - s0) * (int32_t)frac) >> 8));
+    return s0 + mul_q8(s1 - s0, (int32_t)frac);
 }
 
 static void clear_buffers(void)
@@ -548,6 +639,7 @@ static void clear_buffers(void)
     memset(g_fdn_damp, 0, sizeof(g_fdn_damp));
     memset(g_pdiff_idx, 0, sizeof(g_pdiff_idx));
 
+    g_in_dc_q16 = 0;
     g_tap_wr = 0U;
     g_tap_hp_l = 0;
     g_tap_hp_r = 0;
@@ -555,7 +647,8 @@ static void clear_buffers(void)
     g_tap_lp_r = 0;
     g_cho_wr = 0U;
     g_shim_wr = 0U;
-    g_shim_ph = 0U;
+    g_shim_ph_q8 = 0UL;
+    g_shim_wow_lfo = 0UL;
     g_fdn_hp = 0;
     g_cat_cho_hp = 0;
     g_shim_dc = 0;
@@ -637,7 +730,7 @@ const char *ambient_reverb_get_preset_name(ambient_preset_t preset)
     }
 }
 
-void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
+void ambient_reverb_process_stereo_q23(int32_t x, int32_t *out_l, int32_t *out_r)
 {
     ambient_preset_t preset = g_preset;
     if (preset == AMBIENT_PRESET_OFF)
@@ -646,15 +739,24 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
         *out_r = 0;
         return;
     }
+
+    /* 入力最前段 25 Hz DC ブロッカ (ADC の微小 DC オフセット蓄積を除去) */
+    int64_t x_q16 = (int64_t)x << 16;
+    g_in_dc_q16 += ((x_q16 - g_in_dc_q16) * 214LL) >> 16;
+    int32_t x_clean = clamp_s24(x - (int32_t)(g_in_dc_q16 >> 16));
+
     if (preset == AMBIENT_PRESET_BYPASS)
     {
-        *out_l = x;
-        *out_r = x;
+        *out_l = x_clean;
+        *out_r = x_clean;
         return;
     }
 
-    int16_t tap_l = 0;
-    int16_t tap_r = 0;
+    /* 内部 -6 dB ヘッドルームで全段処理し、ギター強入力時の中間段クリップを防止 */
+    int32_t x_in = x_clean >> 1;
+
+    int32_t tap_l = 0;
+    int32_t tap_r = 0;
     int32_t wet_l = 0;
     int32_t wet_r = 0;
 
@@ -668,32 +770,34 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
     /* 1) 48 kHz 64 タップ (32+32) FIR + 前段カスケード拡散 */
     if ((tap_mode != 0U) && (tap_g > 0))
     {
-        multitap_fir_step_48k(x, tap_mode, &tap_l, &tap_r);
-        wet_l += ((int32_t)tap_l * tap_g) >> 8;
-        wet_r += ((int32_t)tap_r * tap_g) >> 8;
+        multitap_fir_step_48k(x_in, tap_mode, &tap_l, &tap_r);
+        wet_l += mul_q8(tap_l, tap_g);
+        wet_r += mul_q8(tap_r, tap_g);
     }
 
     /* 2) 48 kHz 4x4 Hadamard FDN */
     int32_t pre;
     if (preset == AMBIENT_PRESET_SHOEGAZE_CATHEDRAL)
     {
-        pre = (int32_t)x + (((int32_t)tap_l + (int32_t)tap_r) >> 1);
+        /* Reverse Gate の逆スウェルを主役に FDN/Shimmer を膨らませる直列寄りの励振 */
+        pre = (x_in >> 1) + (int32_t)((((int64_t)tap_l + tap_r) * 3LL) >> 2);
     }
     else if (tap_mode != 0U)
     {
-        pre = (((int32_t)tap_l + (int32_t)tap_r) >> 1) + ((int32_t)x >> 2);
+        pre = ((tap_l + tap_r) >> 1) + (x_in >> 2);
     }
     else
     {
-        pre = (int32_t)x;
+        pre = x_in;
     }
     if (shim_g > 0)
     {
-        pre += (g_shim_lp * shim_g) >> 8;
+        /* シマーの FDN 帰還を 1/4 に抑え、ギラつき続けず残響の中で儚く減衰させる */
+        pre += mul_q8(g_shim_lp, shim_g) >> 2;
     }
     /* FDN 入力の軽いローカット (fc ≒ 180 Hz @ 48 kHz) で低域のこもり膨張を防止 */
-    g_fdn_hp += ((pre - g_fdn_hp) * 6) >> 8;
-    int16_t fdn_in = clamp_s16(pre - g_fdn_hp);
+    g_fdn_hp += mul_q8(pre - g_fdn_hp, 6);
+    int32_t fdn_in = clamp_s24(pre - g_fdn_hp);
 
     /* LFO モジュレーション (0..12 サンプル Q8 @ 48 kHz) */
     uint16_t tri = tri_u10(g_fdn_lfo);
@@ -706,101 +810,100 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
     int32_t y3 = fdn_read_mod(g_fdn3, FDN_LEN_3, g_fdn_idx[3], mod_b);
 
     /* 48 kHz フルレート向け自然な空気吸収ダンピング LPF (残響テイルの高域を保つ) */
-    g_fdn_damp[0] += ((y0 - g_fdn_damp[0]) * 232) >> 8;
-    g_fdn_damp[1] += ((y1 - g_fdn_damp[1]) * 226) >> 8;
-    g_fdn_damp[2] += ((y2 - g_fdn_damp[2]) * 220) >> 8;
-    g_fdn_damp[3] += ((y3 - g_fdn_damp[3]) * 214) >> 8;
+    g_fdn_damp[0] += mul_q8(y0 - g_fdn_damp[0], 232);
+    g_fdn_damp[1] += mul_q8(y1 - g_fdn_damp[1], 226);
+    g_fdn_damp[2] += mul_q8(y2 - g_fdn_damp[2], 220);
+    g_fdn_damp[3] += mul_q8(y3 - g_fdn_damp[3], 214);
 
     y0 = g_fdn_damp[0];
     y1 = g_fdn_damp[1];
     y2 = g_fdn_damp[2];
     y3 = g_fdn_damp[3];
 
-    int32_t m0 = (y0 + y1 + y2 + y3) >> 1;
-    int32_t m1 = (y0 - y1 + y2 - y3) >> 1;
-    int32_t m2 = (y0 + y1 - y2 - y3) >> 1;
-    int32_t m3 = (y0 - y1 - y2 + y3) >> 1;
+    int32_t m0 = (int32_t)(((int64_t)y0 + y1 + y2 + y3) >> 1);
+    int32_t m1 = (int32_t)(((int64_t)y0 - y1 + y2 - y3) >> 1);
+    int32_t m2 = (int32_t)(((int64_t)y0 + y1 - y2 - y3) >> 1);
+    int32_t m3 = (int32_t)(((int64_t)y0 - y1 - y2 + y3) >> 1);
 
-    int32_t d_in = (int32_t)fdn_in >> 1;
-    g_fdn0[g_fdn_idx[0]] = clamp_s16(d_in + ((m0 * fb_g) >> 8));
-    g_fdn1[g_fdn_idx[1]] = clamp_s16(-d_in + ((m1 * fb_g) >> 8));
-    g_fdn2[g_fdn_idx[2]] = clamp_s16(d_in + ((m2 * fb_g) >> 8));
-    g_fdn3[g_fdn_idx[3]] = clamp_s16(-d_in + ((m3 * fb_g) >> 8));
+    int32_t d_in = fdn_in >> 1;
+    g_fdn0[g_fdn_idx[0]] = clamp_s24(d_in + mul_q8(m0, fb_g));
+    g_fdn1[g_fdn_idx[1]] = clamp_s24(-d_in + mul_q8(m1, fb_g));
+    g_fdn2[g_fdn_idx[2]] = clamp_s24(d_in + mul_q8(m2, fb_g));
+    g_fdn3[g_fdn_idx[3]] = clamp_s24(-d_in + mul_q8(m3, fb_g));
 
     if (++g_fdn_idx[0] >= FDN_LEN_0) g_fdn_idx[0] = 0U;
     if (++g_fdn_idx[1] >= FDN_LEN_1) g_fdn_idx[1] = 0U;
     if (++g_fdn_idx[2] >= FDN_LEN_2) g_fdn_idx[2] = 0U;
     if (++g_fdn_idx[3] >= FDN_LEN_3) g_fdn_idx[3] = 0U;
 
-    int16_t fdn_l = clamp_s16(y0 - y1);
-    int16_t fdn_r = clamp_s16(y2 - y3);
+    int32_t fdn_l = clamp_s24(y0 - y1);
+    int32_t fdn_r = clamp_s24(y2 - y3);
 
     if ((preset == AMBIENT_PRESET_REVERSE_GATE) || (preset == AMBIENT_PRESET_EARLY_REFLECTIONS))
     {
-        wet_l += (int32_t)fdn_l >> 2;
-        wet_r += (int32_t)fdn_r >> 2;
+        wet_l += fdn_l >> 2;
+        wet_r += fdn_r >> 2;
     }
     else
     {
-        wet_l += (int32_t)fdn_l;
-        wet_r += (int32_t)fdn_r;
+        wet_l += fdn_l;
+        wet_r += fdn_r;
     }
 
     /* 3) 48 kHz Dimension Chorus (揺れない極ワイド空間拡張) */
     if (cho_g > 0)
     {
-        int16_t cho_in;
+        int32_t cho_in;
         if (preset == AMBIENT_PRESET_SHOEGAZE_CATHEDRAL)
         {
             /* Cathedral では 300 Hz 以下を軽く切った信号を Dimension へ送り低域団子化を防止 */
-            int32_t raw_cho = (int32_t)x + (((int32_t)tap_l + (int32_t)tap_r) >> 3);
-            g_cat_cho_hp += ((raw_cho - g_cat_cho_hp) * 10) >> 8; /* fc ≒ 300 Hz */
-            cho_in = clamp_s16(raw_cho - g_cat_cho_hp);
+            int32_t raw_cho = x_in + ((tap_l + tap_r) >> 3);
+            g_cat_cho_hp += mul_q8(raw_cho - g_cat_cho_hp, 10); /* fc ≒ 300 Hz */
+            cho_in = clamp_s24(raw_cho - g_cat_cho_hp);
         }
         else
         {
-            cho_in = x;
+            cho_in = x_in;
         }
-        int16_t dim_l;
-        int16_t dim_r;
+        int32_t dim_l;
+        int32_t dim_r;
 
         dimension_chorus_step_48k(cho_in, &dim_l, &dim_r);
         if (tap_mode == 0U)
         {
             /* Pure Wet Dimension を主役に立て、FDN 空間を奥行きとして添える */
-            wet_l = ((int32_t)dim_l * 280 + (wet_l * 130)) >> 8;
-            wet_r = ((int32_t)dim_r * 280 + (wet_r * 130)) >> 8;
+            wet_l = (int32_t)((((int64_t)dim_l * 280LL) + ((int64_t)wet_l * 130LL)) >> 8);
+            wet_r = (int32_t)((((int64_t)dim_r * 280LL) + ((int64_t)wet_r * 130LL)) >> 8);
         }
         else
         {
-            wet_l += ((int32_t)dim_l * cho_g) >> 8;
-            wet_r += ((int32_t)dim_r * cho_g) >> 8;
+            wet_l += mul_q8(dim_l, cho_g);
+            wet_r += mul_q8(dim_r, cho_g);
         }
     }
 
-    /* 4) 48 kHz +1 オクターブ・シマー (独立 42.7 ms 窓 + 低域カット + エアリー LPF) */
+    /* 4) 48 kHz ノスタルジック +1 オクターブ・シマー (微弱フラット&ワウ + 霞んだ 3.5 kHz LPF + ソフト飽和) */
     if (shim_g > 0)
     {
-        int16_t mono_fdn = (int16_t)(((int32_t)fdn_l + (int32_t)fdn_r) >> 1);
-        int16_t oct_up = shimmer_step_48k(mono_fdn);
+        int32_t mono_fdn = (fdn_l + fdn_r) >> 1;
+        int32_t oct_up = shimmer_step_48k(mono_fdn);
 
-        g_shim_dc += ((int32_t)oct_up - g_shim_dc) >> 5; /* fc ≒ 240 Hz @ 48 kHz */
-        int32_t oct_hp = (int32_t)oct_up - g_shim_dc;
+        g_shim_dc += (oct_up - g_shim_dc) >> 5; /* fc ≒ 240 Hz @ 48 kHz */
+        int32_t oct_hp = oct_up - g_shim_dc;
 
-        g_shim_lp += ((oct_hp - g_shim_lp) * 165) >> 8;  /* fc ≒ 7.8 kHz @ 48 kHz */
-        if (g_shim_lp > 3500) g_shim_lp = 3500;
-        if (g_shim_lp < -3500) g_shim_lp = -3500;
+        int32_t lp_next = g_shim_lp + mul_q8(oct_hp - g_shim_lp, 92); /* fc ≒ 3.5 kHz: 映画フィルム風の霞んだ余韻 */
+        g_shim_lp = soft_sat_s24(lp_next, SHIM_SAT_THRESH);
 
-        wet_l += (g_shim_lp * shim_g) >> 8;
-        wet_r += (g_shim_lp * shim_g) >> 8;
+        wet_l += mul_q8(g_shim_lp, shim_g);
+        wet_r += mul_q8(g_shim_lp, shim_g);
     }
 
     g_fdn_lfo += FDN_LFO_INC;
 
     uint8_t mix = params.mix;
     uint8_t dry_g = (uint8_t)(255U - mix);
-    int32_t final_l = (((int32_t)x * (int32_t)dry_g) + (wet_l * (int32_t)mix)) >> 8;
-    int32_t final_r = (((int32_t)x * (int32_t)dry_g) + (wet_r * (int32_t)mix)) >> 8;
+    int32_t final_l = (int32_t)((((int64_t)x_in * dry_g) + ((int64_t)wet_l * mix)) >> 8);
+    int32_t final_r = (int32_t)((((int64_t)x_in * dry_g) + ((int64_t)wet_r * mix)) >> 8);
 
     /* 5) 高域/低域独立波形ハーモニック・パンニング・トレモロ */
     if (params.pan_depth > 0U)
@@ -813,6 +916,17 @@ void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
                                       params.pan_lo_wave);
     }
 
-    *out_l = clamp_s16(final_l);
-    *out_r = clamp_s16(final_r);
+    /* 内部 -6 dB ヘッドルームを +6 dB 戻し、最終段 -2.5 dBFS ニー付きソフトリミッタで出力 */
+    *out_l = soft_limit_s24(final_l << 1);
+    *out_r = soft_limit_s24(final_r << 1);
+}
+
+void ambient_reverb_process_stereo(int16_t x, int16_t *out_l, int16_t *out_r)
+{
+    int32_t l24;
+    int32_t r24;
+
+    ambient_reverb_process_stereo_q23((int32_t)x << 8, &l24, &r24);
+    *out_l = clamp_s16(l24 >> 8);
+    *out_r = clamp_s16(r24 >> 8);
 }

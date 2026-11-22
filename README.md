@@ -8,7 +8,7 @@ NXP **FRDM-MCXN947**（Cortex-M33 @ 150 MHz / 512 KB SRAM / SAI1 + Audio PLL1）
 
 | FRDM-MCXN947 ヘッダ | MCU ピン / ALT | 機能 | PCM5102A |
 |---|---|---|---|
-| **`J1[1]`** | `P3_16` / `ALT10` (`SAI1_TX_BCLK`) | I²S ビットクロック (1.536 MHz) | **`BCK`** |
+| **`J1[1]`** | `P3_16` / `ALT10` (`SAI1_TX_BCLK`) | I²S ビットクロック (3.072 MHz, 64fs) | **`BCK`** |
 | **`J1[11]`** | `P3_17` / `ALT10` (`SAI1_TX_FS`) | I²S ワードクロック (48.000 kHz) | **`LCK`** |
 | **`J1[5]`** | `P3_20` / `ALT10` (`SAI1_TXD0`) | I²S データ (SDATA) | **`DIN`** |
 | **`J3[12]`** または **`J3[14]`** | `GND` | 共通 GND | **`GND`** |
@@ -24,8 +24,8 @@ NXP **FRDM-MCXN947**（Cortex-M33 @ 150 MHz / 512 KB SRAM / SAI1 + Audio PLL1）
 
 - 外部水晶 `24.000 MHz` → Audio PLL1（`NDIV=25, PDIV=2, MDIV=512`）→ **`122.880 MHz`**
 - `PLL1_CLK0`（÷10）→ **`12.288 MHz`** → `SAI1`
-- `SAI1` I²S Master（16-bit ステレオ / 32-bit フレーム）:
-  - **`BCLK = 1,536,000.00 Hz`**
+- `SAI1` I²S Master（24-bit ステレオ / 32-bit スロット = 64fs フレーム、PCM5102A / PCM1808 互換）:
+  - **`BCLK = 3,072,000.00 Hz`**
   - **`LRCK = 48,000.00 Hz`**（水晶精度、理論誤差 0.0000%）
 
 ---

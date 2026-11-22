@@ -17,8 +17,8 @@
 #define DSP_PROFILE_REPORT_MS 5000U
 
 static bool g_ch_right = false;
-static int16_t g_cur_l = 0;
-static int16_t g_cur_r = 0;
+static int32_t g_cur_l = 0;
+static int32_t g_cur_r = 0;
 
 /*
  * DSP 1 フレーム (L/R ペア) あたりの実行サイクル集計。
@@ -112,17 +112,18 @@ static void sai_fill_fifo(void)
     {
         if (!g_ch_right)
         {
-            /* 原音生成と DSP をまとめて 1 フレーム分の実コストとして計測する */
-            uint32_t t0  = MSDK_GetCpuCycleCount();
-            int16_t raw  = audio_synth_next_sample();
-            ambient_reverb_process_stereo(raw, &g_cur_l, &g_cur_r);
+            /* 原音生成と 24-bit DSP をまとめて 1 フレーム分の実コストとして計測する */
+            uint32_t t0   = MSDK_GetCpuCycleCount();
+            int32_t in_q23 = (int32_t)audio_synth_next_sample() << 8;
+            ambient_reverb_process_stereo_q23(in_q23, &g_cur_l, &g_cur_r);
             dsp_profile_accumulate(MSDK_GetCpuCycleCount() - t0);
 
-            SAI_WriteData(AUDIO_SAI, AUDIO_SAI_CHANNEL, (uint32_t)(uint16_t)g_cur_l);
+            /* 32-bit I2S スロットの上位 24-bit へ左詰め送信 (PCM5102A / PCM1808 64fs 共通) */
+            SAI_WriteData(AUDIO_SAI, AUDIO_SAI_CHANNEL, (uint32_t)g_cur_l << 8);
         }
         else
         {
-            SAI_WriteData(AUDIO_SAI, AUDIO_SAI_CHANNEL, (uint32_t)(uint16_t)g_cur_r);
+            SAI_WriteData(AUDIO_SAI, AUDIO_SAI_CHANNEL, (uint32_t)g_cur_r << 8);
         }
         g_ch_right = !g_ch_right;
     }
@@ -192,8 +193,8 @@ int main(void)
     /* DWT サイクルカウンタを有効化 (DSP 負荷の実測用) */
     MSDK_EnableCpuCycleCounter();
 
-    PRINTF("\r\n=== FRDM-MCXN947 48kHz Full-Rate Ambient/Shoegaze DSP ===\r\n");
-    PRINTF("Core: %u Hz | SAI1 MCLK: %u Hz | Fs: %u Hz (0 ppm)\r\n",
+    PRINTF("\r\n=== FRDM-MCXN947 48kHz / 24-bit Full-Rate Ambient/Shoegaze DSP ===\r\n");
+    PRINTF("Core: %u Hz | SAI1 MCLK: %u Hz | Fs: %u Hz 24-bit (64fs, 0 ppm)\r\n",
            (unsigned int)SystemCoreClock, (unsigned int)AUDIO_MCLK_HZ, (unsigned int)AUDIO_SAMPLE_RATE_HZ);
     PRINTF("SW2: Preset | SW3: Source\r\n");
     PRINTF("Preset: %s\r\n", ambient_reverb_get_preset_name(preset));
